@@ -1,0 +1,190 @@
+import { db } from './db.js';
+import { syncSmsSession } from './zoomPhoneService.js';
+
+type ZoomSmsMessage = {
+    sender?: unknown;
+    direction?: string;
+    message?: string;
+    attachments?: unknown;
+    to_members?: unknown;
+    message_id?: string;
+    message_type?: string;
+    date_time?: string;
+};
+
+type ZoomSmsSyncResponse = {
+    sms_histories?: ZoomSmsMessage[];
+    sync_token?: string;
+};
+
+export async function syncSmsMessagesForSession(
+    installationId: string,
+    smsSessionId: number
+): Promise<{
+    messagesProcessed: number;
+    syncTokenSaved: boolean;
+}> {
+    const sessionResult = await db.query(
+        `
+        SELECT
+            id,
+            zoom_session_id
+        FROM zoom_sms_sessions
+        WHERE id = $1
+          AND installation_id = $2
+        LIMIT 1
+        `,
+        [
+            smsSessionId,
+            installationId
+        ]
+    );
+
+    if (sessionResult.rowCount !== 1) {
+        throw new Error(
+            'SMS session not found for installation'
+        );
+    }
+
+    const zoomSessionId =
+        sessionResult.rows[0].zoom_session_id;
+
+    const response =
+        await syncSmsSession(
+            installationId,
+            zoomSessionId,
+            {
+                syncType: 'FSync',
+                count: 100
+            }
+        ) as ZoomSmsSyncResponse;
+
+    const messages =
+        Array.isArray(response.sms_histories)
+            ? response.sms_histories
+            : [];
+
+    const client = await db.connect();
+
+    let messagesProcessed = 0;
+
+    try {
+        await client.query('BEGIN');
+
+        for (const message of messages) {
+            if (!message.message_id) {
+                continue;
+            }
+
+            await client.query(
+                `
+                INSERT INTO zoom_sms_messages (
+                    sms_session_id,
+                    zoom_message_id,
+                    direction,
+                    message_type,
+                    message_body,
+                    message_date_time,
+                    sender,
+                    to_members,
+                    attachments
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9
+                )
+                ON CONFLICT (
+                    sms_session_id,
+                    zoom_message_id
+                )
+                DO UPDATE SET
+                    direction =
+                        EXCLUDED.direction,
+                    message_type =
+                        EXCLUDED.message_type,
+                    message_body =
+                        EXCLUDED.message_body,
+                    message_date_time =
+                        EXCLUDED.message_date_time,
+                    sender =
+                        EXCLUDED.sender,
+                    to_members =
+                        EXCLUDED.to_members,
+                    attachments =
+                        EXCLUDED.attachments,
+                    updated_at = NOW()
+                `,
+                [
+                    smsSessionId,
+                    message.message_id,
+                    message.direction ?? null,
+                    message.message_type ?? null,
+                    message.message ?? null,
+                    message.date_time
+                        ? new Date(message.date_time)
+                        : null,
+                    message.sender
+                        ? JSON.stringify(message.sender)
+                        : null,
+                    message.to_members
+                        ? JSON.stringify(message.to_members)
+                        : null,
+                    message.attachments
+                        ? JSON.stringify(message.attachments)
+                        : null
+                ]
+            );
+
+            messagesProcessed += 1;
+        }
+
+        if (response.sync_token) {
+            await client.query(
+                `
+                UPDATE zoom_sms_sessions
+                SET
+                    sync_token = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                `,
+                [
+                    response.sync_token,
+                    smsSessionId
+                ]
+            );
+        }
+
+        await client.query('COMMIT');
+
+        console.log('[ZOOM SMS MESSAGE SYNC SUCCESS]', {
+            installationId,
+            smsSessionId,
+            messagesProcessed,
+            syncTokenSaved:
+                Boolean(response.sync_token)
+        });
+
+        return {
+            messagesProcessed,
+            syncTokenSaved:
+                Boolean(response.sync_token)
+        };
+    } catch (error) {
+        try {
+            await client.query('ROLLBACK');
+        } catch {
+            // Preserve original error.
+        }
+
+        throw error;
+    } finally {
+        client.release();
+    }
+}
