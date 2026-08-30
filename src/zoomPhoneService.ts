@@ -66,7 +66,12 @@ export async function getSmsSessions(
 
 export async function syncSmsSession(
     installationId: string,
-    zoomSessionId: string
+    zoomSessionId: string,
+    options: {
+        syncType?: 'FSync' | 'ISync' | 'BSync';
+        count?: number;
+        syncToken?: string;
+    } = {}
 ): Promise<any> {
     const accessToken =
         await getValidZoomAccessToken(installationId);
@@ -76,6 +81,23 @@ export async function syncSmsSession(
             zoomSessionId
         )}/sync`
     );
+
+    url.searchParams.set(
+        'sync_type',
+        options.syncType ?? 'FSync'
+    );
+
+    url.searchParams.set(
+        'count',
+        String(options.count ?? 100)
+    );
+
+    if (options.syncToken) {
+        url.searchParams.set(
+            'sync_token',
+            options.syncToken
+        );
+    }
 
     const response = await fetch(
         url.toString(),
@@ -98,6 +120,11 @@ export async function syncSmsSession(
                 typeof responseBody === 'object' &&
                 responseBody !== null
                     ? responseBody.code
+                    : undefined,
+            zoomMessage:
+                typeof responseBody === 'object' &&
+                responseBody !== null
+                    ? responseBody.message
                     : undefined
         });
 
