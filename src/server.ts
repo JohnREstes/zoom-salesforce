@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 
 import { saveZoomTokens } from './zoomTokenStore.js';
+import { db } from './db.js';
 
 dotenv.config();
 
@@ -24,12 +25,17 @@ app.get('/health', (_req, res) => {
     });
 });
 
-app.post('/webhooks/zoom', (req, res) => {
+async function handleZoomWebhook(
+    req: express.Request,
+    res: express.Response,
+    webhookKey?: string
+) {
     const event = req.body;
+    const secretToken = process.env.ZOOM_WEBHOOK_SECRET;
 
+    // Zoom endpoint validation
     if (event?.event === 'endpoint.url_validation') {
         const plainToken = event?.payload?.plainToken;
-        const secretToken = process.env.ZOOM_WEBHOOK_SECRET;
 
         if (!plainToken || !secretToken) {
             return res.status(400).json({
@@ -48,9 +54,104 @@ app.post('/webhooks/zoom', (req, res) => {
         });
     }
 
-    console.log('[ZOOM WEBHOOK]', JSON.stringify(event));
+    // Installation-specific webhook
+    if (webhookKey) {
+        const installationResult = await db.query(
+            `
+            SELECT id, zoom_account_id
+            FROM installations
+            WHERE webhook_key = $1
+            LIMIT 1
+            `,
+            [webhookKey]
+        );
+
+        if (installationResult.rowCount !== 1) {
+            return res.status(404).json({
+                error: 'Unknown Communik8 installation'
+            });
+        }
+
+        const installation = installationResult.rows[0];
+        const zoomAccountId = event?.payload?.account_id;
+
+        if (zoomAccountId) {
+            // Prevent an installation from silently changing
+            // to a different Zoom account.
+            if (
+                installation.zoom_account_id &&
+                installation.zoom_account_id !== zoomAccountId
+            ) {
+                console.error('[ZOOM WEBHOOK ACCOUNT MISMATCH]', {
+                    installationId: installation.id
+                });
+
+                return res.sendStatus(403);
+            }
+
+            await db.query(
+                `
+                UPDATE installations
+                SET
+                    zoom_account_id = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                  AND zoom_account_id IS NULL
+                `,
+                [zoomAccountId, installation.id]
+            );
+
+            await db.query(
+                `
+                UPDATE zoom_oauth_tokens
+                SET
+                    zoom_account_id = $1,
+                    updated_at = NOW()
+                WHERE installation_id = $2
+                  AND zoom_account_id IS NULL
+                `,
+                [zoomAccountId, installation.id]
+            );
+        }
+
+        console.log('[ZOOM WEBHOOK]', {
+            event: event?.event,
+            installationId: installation.id,
+            hasAccountId: Boolean(zoomAccountId)
+        });
+
+        return res.sendStatus(200);
+    }
+
+    // Temporary legacy endpoint while we transition Zoom
+    // to installation-specific webhook URLs.
+    console.log('[ZOOM WEBHOOK LEGACY]', {
+        event: event?.event
+    });
 
     return res.sendStatus(200);
+}
+
+app.post('/webhooks/zoom', async (req, res) => {
+    try {
+        return await handleZoomWebhook(req, res);
+    } catch (error) {
+        console.error('[ZOOM WEBHOOK ERROR]', error);
+        return res.sendStatus(500);
+    }
+});
+
+app.post('/webhooks/zoom/:webhookKey', async (req, res) => {
+    try {
+        return await handleZoomWebhook(
+            req,
+            res,
+            req.params.webhookKey
+        );
+    } catch (error) {
+        console.error('[ZOOM WEBHOOK ERROR]', error);
+        return res.sendStatus(500);
+    }
 });
 
 app.get('/auth/zoom/callback', async (req, res) => {
