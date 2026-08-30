@@ -6,6 +6,11 @@ import dotenv from 'dotenv';
 import { saveZoomTokens } from './zoomTokenStore.js';
 import { db } from './db.js';
 
+import {
+    createOAuthState,
+    verifyOAuthState
+} from './oauthState.js';
+
 dotenv.config();
 
 const app = express();
@@ -223,9 +228,30 @@ app.get('/auth/zoom/callback', async (req, res) => {
     try {
         const code = req.query.code;
 
-        if (!code || typeof code !== 'string') {
-            return res.status(400).send('Missing Zoom authorization code.');
-        }
+        const state = req.query.state;
+
+    if (!code || typeof code !== 'string') {
+        return res.status(400).send(
+            'Missing Zoom authorization code.'
+        );
+    }
+
+    if (!state || typeof state !== 'string') {
+        return res.status(400).send(
+            'Missing OAuth state.'
+        );
+    }
+
+    const statePayload = verifyOAuthState(state);
+
+    if (!statePayload) {
+        return res.status(400).send(
+            'Invalid or expired OAuth state.'
+        );
+    }
+
+    const installationId =
+        statePayload.installationId;
 
         const clientId = process.env.ZOOM_CLIENT_ID;
         const clientSecret = process.env.ZOOM_CLIENT_SECRET;
@@ -263,7 +289,10 @@ app.get('/auth/zoom/callback', async (req, res) => {
             });
         }
 
-        await saveZoomTokens(tokenData);
+        await saveZoomTokens(
+            tokenData,
+            installationId
+        );
 
         console.log('[ZOOM OAUTH SUCCESS]', {
             expires_in: tokenData.expires_in,
@@ -288,6 +317,79 @@ app.get('/auth/zoom/callback', async (req, res) => {
 
         return res.status(500).send(
             'An unexpected error occurred while connecting Zoom.'
+        );
+    }
+});
+
+app.get('/auth/zoom/start/:installationId', async (req, res) => {
+    try {
+        const installationId = req.params.installationId;
+
+        const uuidPattern =
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+        if (!uuidPattern.test(installationId)) {
+            return res.status(404).send(
+                'Communik8 installation not found.'
+            );
+        }
+
+        const installationResult = await db.query(
+            `
+            SELECT id
+            FROM installations
+            WHERE id = $1
+            LIMIT 1
+            `,
+            [installationId]
+        );
+
+        if (installationResult.rowCount !== 1) {
+            return res.status(404).send(
+                'Communik8 installation not found.'
+            );
+        }
+
+        const clientId = process.env.ZOOM_CLIENT_ID;
+        const redirectUri = process.env.ZOOM_REDIRECT_URI;
+
+        if (!clientId || !redirectUri) {
+            return res.status(500).send(
+                'Zoom OAuth is not configured.'
+            );
+        }
+
+        const state = createOAuthState(installationId);
+
+        const authorizeUrl =
+            new URL('https://zoom.us/oauth/authorize');
+
+        authorizeUrl.searchParams.set(
+            'response_type',
+            'code'
+        );
+
+        authorizeUrl.searchParams.set(
+            'client_id',
+            clientId
+        );
+
+        authorizeUrl.searchParams.set(
+            'redirect_uri',
+            redirectUri
+        );
+
+        authorizeUrl.searchParams.set(
+            'state',
+            state
+        );
+
+        return res.redirect(authorizeUrl.toString());
+    } catch (error) {
+        console.error('[ZOOM OAUTH START ERROR]', error);
+
+        return res.status(500).send(
+            'Unable to start Zoom authorization.'
         );
     }
 });
