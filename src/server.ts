@@ -12,8 +12,7 @@ import {
 } from './oauthState.js';
 
 import {
-    ensureSmsSessionFromWebhook,
-    cleanupEmptyWebhookSmsSession
+    ensureSmsSessionFromWebhook
 } from './zoomSmsSyncService.js';
 
 import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
@@ -241,30 +240,20 @@ async function handleZoomWebhook(
                         zoomStatus?: number;
                     };
 
-                    if (zoomError.zoomCode === 12004) {
-                        let cleanedUp = false;
-
-                        if (created) {
-                            cleanedUp =
-                                await cleanupEmptyWebhookSmsSession(
-                                    installation.id,
-                                    smsSessionId
-                                );
+                if (zoomError.zoomCode === 12004) {
+                    console.warn(
+                        '[ZOOM SMS WEBHOOK SESSION TEMPORARILY UNAVAILABLE]',
+                        {
+                            event: event.event,
+                            installationId: installation.id,
+                            smsSessionId,
+                            created,
+                            zoomCode: zoomError.zoomCode
                         }
-
-                        console.warn(
-                            '[ZOOM SMS WEBHOOK SESSION NOT SYNCABLE]',
-                            {
-                                event: event.event,
-                                installationId: installation.id,
-                                smsSessionId,
-                                zoomCode: zoomError.zoomCode,
-                                cleanedUp
-                            }
-                        );
-                    } else {
-                        throw error;
-                    }
+                    );
+                } else {
+                    throw error;
+                }
                 }
             } else {
                 console.warn(
