@@ -107,7 +107,7 @@ app.get('/auth/zoom/callback', async (req, res) => {
                     padding: 40px;
                     text-align: center;
                 ">
-                    <h1>CommBeyond connected successfully</h1>
+                    <h1>Communik8 connected successfully</h1>
                     <p>Zoom Phone authorization was completed.</p>
                     <p>You can close this window.</p>
                 </body>
