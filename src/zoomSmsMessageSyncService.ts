@@ -28,10 +28,11 @@ export async function syncSmsMessagesForSession(
         `
         SELECT
             id,
-            zoom_session_id
+            zoom_session_id,
+            sync_token
         FROM zoom_sms_sessions
         WHERE id = $1
-          AND installation_id = $2
+        AND installation_id = $2
         LIMIT 1
         `,
         [
@@ -49,14 +50,23 @@ export async function syncSmsMessagesForSession(
     const zoomSessionId =
         sessionResult.rows[0].zoom_session_id;
 
+    const existingSyncToken =
+        sessionResult.rows[0].sync_token;
+
     const response =
         await syncSmsSession(
             installationId,
             zoomSessionId,
-            {
-                syncType: 'FSync',
-                count: 100
-            }
+            existingSyncToken
+                ? {
+                    syncType: 'ISync',
+                    count: 100,
+                    syncToken: existingSyncToken
+                }
+                : {
+                    syncType: 'FSync',
+                    count: 100
+                }
         ) as ZoomSmsSyncResponse;
 
     const messages =
@@ -166,6 +176,10 @@ export async function syncSmsMessagesForSession(
         console.log('[ZOOM SMS MESSAGE SYNC SUCCESS]', {
             installationId,
             smsSessionId,
+            syncType:
+                existingSyncToken
+                    ? 'ISync'
+                    : 'FSync',
             messagesProcessed,
             syncTokenSaved:
                 Boolean(response.sync_token)
