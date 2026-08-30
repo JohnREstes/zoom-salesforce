@@ -210,6 +210,7 @@ async function handleZoomWebhook(
                             : undefined
                     );
 
+            try {
                 const syncResult =
                     await syncSmsMessagesForSession(
                         installation.id,
@@ -225,6 +226,26 @@ async function handleZoomWebhook(
                     syncTokenSaved:
                         syncResult.syncTokenSaved
                 });
+            } catch (error) {
+                const zoomError = error as Error & {
+                    zoomCode?: number;
+                    zoomStatus?: number;
+                };
+
+                if (zoomError.zoomCode === 12004) {
+                    console.warn(
+                        '[ZOOM SMS WEBHOOK SESSION NOT SYNCABLE]',
+                        {
+                            event: event.event,
+                            installationId: installation.id,
+                            smsSessionId,
+                            zoomCode: zoomError.zoomCode
+                        }
+                    );
+                } else {
+                    throw error;
+                }
+            }
             } else {
                 console.warn(
                     '[ZOOM SMS WEBHOOK MISSING SESSION ID]',
