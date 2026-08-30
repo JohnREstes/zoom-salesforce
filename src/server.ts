@@ -56,6 +56,15 @@ async function handleZoomWebhook(
 
     // Installation-specific webhook
     if (webhookKey) {
+        const uuidPattern =
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+        if (!uuidPattern.test(webhookKey)) {
+            return res.status(404).json({
+                error: 'Unknown Communik8 installation'
+            });
+        }
+
         const installationResult = await db.query(
             `
             SELECT id, zoom_account_id
