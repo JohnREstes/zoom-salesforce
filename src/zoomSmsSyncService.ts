@@ -189,14 +189,73 @@ export async function ensureSmsSessionFromWebhook(
     installationId: string,
     zoomSessionId: string,
     lastAccessTime?: string
-): Promise<number> {
+): Promise<{
+    smsSessionId: number;
+    created: boolean;
+}> {
     if (!zoomSessionId) {
         throw new Error(
             'Zoom SMS session ID is required'
         );
     }
 
-    const result = await db.query(
+    /*
+     * First look for an existing session.
+     */
+    const existingResult = await db.query(
+        `
+        SELECT id
+        FROM zoom_sms_sessions
+        WHERE installation_id = $1
+          AND zoom_session_id = $2
+        LIMIT 1
+        `,
+        [
+            installationId,
+            zoomSessionId
+        ]
+    );
+
+    if (existingResult.rowCount === 1) {
+        const smsSessionId = Number(
+            existingResult.rows[0].id
+        );
+
+        if (lastAccessTime) {
+            await db.query(
+                `
+                UPDATE zoom_sms_sessions
+                SET
+                    last_access_time = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                `,
+                [
+                    new Date(lastAccessTime),
+                    smsSessionId
+                ]
+            );
+        }
+
+        console.log('[ZOOM SMS SESSION ENSURED]', {
+            installationId,
+            smsSessionId,
+            created: false
+        });
+
+        return {
+            smsSessionId,
+            created: false
+        };
+    }
+
+    /*
+     * This is a session we have not seen before.
+     *
+     * ON CONFLICT still protects us if two webhook deliveries
+     * arrive at nearly the same time.
+     */
+    const insertResult = await db.query(
         `
         INSERT INTO zoom_sms_sessions (
             installation_id,
@@ -219,7 +278,9 @@ export async function ensureSmsSessionFromWebhook(
                     zoom_sms_sessions.last_access_time
                 ),
             updated_at = NOW()
-        RETURNING id
+        RETURNING
+            id,
+            (xmax = 0) AS inserted
         `,
         [
             installationId,
@@ -230,23 +291,65 @@ export async function ensureSmsSessionFromWebhook(
         ]
     );
 
-    if (result.rowCount !== 1) {
+    if (insertResult.rowCount !== 1) {
         throw new Error(
             'Unable to ensure SMS session'
         );
     }
 
     const smsSessionId = Number(
-        result.rows[0].id
+        insertResult.rows[0].id
     );
 
-    console.log(
-        '[ZOOM SMS SESSION ENSURED]',
-        {
-            installationId,
-            smsSessionId
-        }
+    const created =
+        insertResult.rows[0].inserted === true;
+
+    console.log('[ZOOM SMS SESSION ENSURED]', {
+        installationId,
+        smsSessionId,
+        created
+    });
+
+    return {
+        smsSessionId,
+        created
+    };
+}
+
+export async function cleanupEmptyWebhookSmsSession(
+    installationId: string,
+    smsSessionId: number
+): Promise<boolean> {
+    const result = await db.query(
+        `
+        DELETE FROM zoom_sms_sessions AS session
+        WHERE session.id = $1
+          AND session.installation_id = $2
+          AND session.sync_token IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM zoom_sms_messages AS message
+              WHERE message.sms_session_id = session.id
+          )
+        RETURNING session.id
+        `,
+        [
+            smsSessionId,
+            installationId
+        ]
     );
 
-    return smsSessionId;
+    const deleted = result.rowCount === 1;
+
+    if (deleted) {
+        console.log(
+            '[ZOOM SMS EMPTY SESSION CLEANED]',
+            {
+                installationId,
+                smsSessionId
+            }
+        );
+    }
+
+    return deleted;
 }
