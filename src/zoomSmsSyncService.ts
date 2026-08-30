@@ -185,3 +185,68 @@ export async function syncSmsSessions(
     };
 }
 
+export async function ensureSmsSessionFromWebhook(
+    installationId: string,
+    zoomSessionId: string,
+    lastAccessTime?: string
+): Promise<number> {
+    if (!zoomSessionId) {
+        throw new Error(
+            'Zoom SMS session ID is required'
+        );
+    }
+
+    const result = await db.query(
+        `
+        INSERT INTO zoom_sms_sessions (
+            installation_id,
+            zoom_session_id,
+            last_access_time
+        )
+        VALUES (
+            $1,
+            $2,
+            $3
+        )
+        ON CONFLICT (
+            installation_id,
+            zoom_session_id
+        )
+        DO UPDATE SET
+            last_access_time =
+                COALESCE(
+                    EXCLUDED.last_access_time,
+                    zoom_sms_sessions.last_access_time
+                ),
+            updated_at = NOW()
+        RETURNING id
+        `,
+        [
+            installationId,
+            zoomSessionId,
+            lastAccessTime
+                ? new Date(lastAccessTime)
+                : null
+        ]
+    );
+
+    if (result.rowCount !== 1) {
+        throw new Error(
+            'Unable to ensure SMS session'
+        );
+    }
+
+    const smsSessionId = Number(
+        result.rows[0].id
+    );
+
+    console.log(
+        '[ZOOM SMS SESSION ENSURED]',
+        {
+            installationId,
+            smsSessionId
+        }
+    );
+
+    return smsSessionId;
+}
