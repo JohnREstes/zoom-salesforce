@@ -3,6 +3,8 @@ import express from 'express';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 
+import { saveZoomTokens } from './zoomTokenStore.js';
+
 dotenv.config();
 
 const app = express();
@@ -94,6 +96,8 @@ app.get('/auth/zoom/callback', async (req, res) => {
                 error: 'Zoom OAuth token exchange failed'
             });
         }
+
+        await saveZoomTokens(tokenData);
 
         console.log('[ZOOM OAUTH SUCCESS]', {
             expires_in: tokenData.expires_in,
