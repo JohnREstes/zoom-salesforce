@@ -11,6 +11,9 @@ import {
     verifyOAuthState
 } from './oauthState.js';
 
+import { ensureSmsSessionFromWebhook } from './zoomSmsSyncService.js';
+import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
+
 dotenv.config();
 
 const app = express();
@@ -186,24 +189,51 @@ async function handleZoomWebhook(
 
         if (
             typeof event?.event === 'string' &&
-            event.event.toLowerCase().includes('sms')
+            (
+                event.event === 'phone.sms_sent' ||
+                event.event === 'phone.sms_received'
+            )
         ) {
-            const payload = event?.payload;
-            const object = payload?.object;
+            const zoomSessionId =
+                event?.payload?.object?.session_id;
 
-            console.log('[ZOOM SMS WEBHOOK SHAPE]', {
-                event: event.event,
+            const messageDateTime =
+                event?.payload?.object?.date_time;
 
-                payloadKeys:
-                    payload && typeof payload === 'object'
-                        ? Object.keys(payload)
-                        : [],
+            if (typeof zoomSessionId === 'string' && zoomSessionId) {
+                const smsSessionId =
+                    await ensureSmsSessionFromWebhook(
+                        installation.id,
+                        zoomSessionId,
+                        typeof messageDateTime === 'string'
+                            ? messageDateTime
+                            : undefined
+                    );
 
-                objectKeys:
-                    object && typeof object === 'object'
-                        ? Object.keys(object)
-                        : []
-            });
+                const syncResult =
+                    await syncSmsMessagesForSession(
+                        installation.id,
+                        smsSessionId
+                    );
+
+                console.log('[ZOOM SMS WEBHOOK SYNC]', {
+                    event: event.event,
+                    installationId: installation.id,
+                    smsSessionId,
+                    messagesProcessed:
+                        syncResult.messagesProcessed,
+                    syncTokenSaved:
+                        syncResult.syncTokenSaved
+                });
+            } else {
+                console.warn(
+                    '[ZOOM SMS WEBHOOK MISSING SESSION ID]',
+                    {
+                        event: event.event,
+                        installationId: installation.id
+                    }
+                );
+            }
         }
 
         console.log('[ZOOM WEBHOOK]', {
