@@ -14,7 +14,12 @@ const PORT = Number(process.env.PORT || 3050);
 const HOST = process.env.HOST || '127.0.0.1';
 
 app.use(helmet());
-app.use(express.json());
+app.use(express.json({
+    verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody =
+            Buffer.from(buf);
+    }
+}));
 
 app.get('/health', (_req, res) => {
     res.json({
@@ -24,6 +29,49 @@ app.get('/health', (_req, res) => {
         timestamp: new Date().toISOString()
     });
 });
+
+function verifyZoomWebhookSignature(req: express.Request): boolean {
+    const secretToken = process.env.ZOOM_WEBHOOK_SECRET;
+    const timestamp = req.headers['x-zm-request-timestamp'];
+    const zoomSignature = req.headers['x-zm-signature'];
+
+    if (
+        !secretToken ||
+        typeof timestamp !== 'string' ||
+        typeof zoomSignature !== 'string'
+    ) {
+        return false;
+    }
+
+    const rawBody = (
+        req as express.Request & { rawBody?: Buffer }
+    ).rawBody;
+
+    if (!rawBody) {
+        return false;
+    }
+
+    const message = `v0:${timestamp}:${rawBody.toString('utf8')}`;
+
+    const hash = crypto
+        .createHmac('sha256', secretToken)
+        .update(message)
+        .digest('hex');
+
+    const expectedSignature = `v0=${hash}`;
+
+    const expectedBuffer = Buffer.from(expectedSignature);
+    const receivedBuffer = Buffer.from(zoomSignature);
+
+    if (expectedBuffer.length !== receivedBuffer.length) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(
+        expectedBuffer,
+        receivedBuffer
+    );
+}
 
 async function handleZoomWebhook(
     req: express.Request,
@@ -52,6 +100,14 @@ async function handleZoomWebhook(
             plainToken,
             encryptedToken
         });
+    }
+
+    if (!verifyZoomWebhookSignature(req)) {
+        console.warn('[ZOOM WEBHOOK SIGNATURE INVALID]', {
+            event: event?.event
+        });
+
+        return res.sendStatus(401);
     }
 
     // Installation-specific webhook
