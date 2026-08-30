@@ -63,3 +63,48 @@ export async function getSmsSessions(
 
     return responseBody;
 }
+
+export async function syncSmsSession(
+    installationId: string,
+    zoomSessionId: string
+): Promise<any> {
+    const accessToken =
+        await getValidZoomAccessToken(installationId);
+
+    const url = new URL(
+        `${ZOOM_API_BASE_URL}/phone/sms/sessions/${encodeURIComponent(
+            zoomSessionId
+        )}/sync`
+    );
+
+    const response = await fetch(
+        url.toString(),
+        {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json'
+            }
+        }
+    );
+
+    const responseBody = await response.json();
+
+    if (!response.ok) {
+        console.error('[ZOOM SMS SESSION SYNC FAILED]', {
+            installationId,
+            status: response.status,
+            zoomCode:
+                typeof responseBody === 'object' &&
+                responseBody !== null
+                    ? responseBody.code
+                    : undefined
+        });
+
+        throw new Error(
+            `Zoom SMS session sync failed with status ${response.status}`
+        );
+    }
+
+    return responseBody;
+}
