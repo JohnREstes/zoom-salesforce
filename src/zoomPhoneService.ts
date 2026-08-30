@@ -128,9 +128,23 @@ export async function syncSmsSession(
                     : undefined
         });
 
-        throw new Error(
+        const error = new Error(
             `Zoom SMS session sync failed with status ${response.status}`
-        );
+        ) as Error & {
+            zoomCode?: number;
+            zoomStatus?: number;
+        };
+
+        error.zoomCode =
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            typeof responseBody.code === 'number'
+                ? responseBody.code
+                : undefined;
+
+        error.zoomStatus = response.status;
+
+        throw error;
     }
 
     return responseBody;
