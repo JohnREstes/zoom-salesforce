@@ -184,6 +184,28 @@ async function handleZoomWebhook(
             );
         }
 
+        if (
+            typeof event?.event === 'string' &&
+            event.event.toLowerCase().includes('sms')
+        ) {
+            const payload = event?.payload;
+            const object = payload?.object;
+
+            console.log('[ZOOM SMS WEBHOOK SHAPE]', {
+                event: event.event,
+
+                payloadKeys:
+                    payload && typeof payload === 'object'
+                        ? Object.keys(payload)
+                        : [],
+
+                objectKeys:
+                    object && typeof object === 'object'
+                        ? Object.keys(object)
+                        : []
+            });
+        }
+
         console.log('[ZOOM WEBHOOK]', {
             event: event?.event,
             installationId: installation.id,
