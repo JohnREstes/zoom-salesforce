@@ -18,8 +18,13 @@ import {
 import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
 
 import {
-    createSalesforceOAuthAttempt
+    createSalesforceOAuthAttempt,
+    consumeSalesforceOAuthAttempt
 } from './salesforceOAuthService.js';
+
+import {
+    encrypt
+} from './crypto.js';
 
 dotenv.config();
 
@@ -476,6 +481,283 @@ app.get('/auth/zoom/start/:installationId', async (req, res) => {
 
         return res.status(500).send(
             'Unable to start Zoom authorization.'
+        );
+    }
+});
+
+app.get('/auth/salesforce/callback', async (req, res) => {
+    try {
+        const code = req.query.code;
+        const state = req.query.state;
+
+        if (!code || typeof code !== 'string') {
+            return res.status(400).send(
+                'Missing Salesforce authorization code.'
+            );
+        }
+
+        if (!state || typeof state !== 'string') {
+            return res.status(400).send(
+                'Missing Salesforce OAuth state.'
+            );
+        }
+
+        const oauthAttempt =
+            await consumeSalesforceOAuthAttempt(state);
+
+        if (!oauthAttempt) {
+            return res.status(400).send(
+                'Invalid or expired Salesforce OAuth state.'
+            );
+        }
+
+        const clientId =
+            process.env.SALESFORCE_CLIENT_ID;
+
+        const clientSecret =
+            process.env.SALESFORCE_CLIENT_SECRET;
+
+        const redirectUri =
+            process.env.SALESFORCE_REDIRECT_URI;
+
+        if (
+            !clientId ||
+            !clientSecret ||
+            !redirectUri
+        ) {
+            console.error(
+                '[SALESFORCE OAUTH] Missing OAuth configuration'
+            );
+
+            return res.status(500).send(
+                'Salesforce OAuth is not configured.'
+            );
+        }
+
+        const tokenUrl =
+            new URL(
+                `${oauthAttempt.loginUrl}/services/oauth2/token`
+            );
+
+        const tokenBody =
+            new URLSearchParams();
+
+        tokenBody.set(
+            'grant_type',
+            'authorization_code'
+        );
+
+        tokenBody.set(
+            'code',
+            code
+        );
+
+        tokenBody.set(
+            'client_id',
+            clientId
+        );
+
+        tokenBody.set(
+            'client_secret',
+            clientSecret
+        );
+
+        tokenBody.set(
+            'redirect_uri',
+            redirectUri
+        );
+
+        tokenBody.set(
+            'code_verifier',
+            oauthAttempt.codeVerifier
+        );
+
+        const tokenResponse =
+            await fetch(
+                tokenUrl.toString(),
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type':
+                            'application/x-www-form-urlencoded'
+                    },
+                    body: tokenBody.toString()
+                }
+            );
+
+        const tokenData =
+            await tokenResponse.json() as {
+                access_token?: string;
+                refresh_token?: string;
+                instance_url?: string;
+                id?: string;
+                token_type?: string;
+                issued_at?: string;
+                scope?: string;
+                error?: string;
+                error_description?: string;
+            };
+
+        if (
+            !tokenResponse.ok ||
+            !tokenData.access_token ||
+            !tokenData.instance_url
+        ) {
+            console.error(
+                '[SALESFORCE OAUTH TOKEN ERROR]',
+                {
+                    status: tokenResponse.status,
+                    error: tokenData.error,
+                    description:
+                        tokenData.error_description
+                }
+            );
+
+            return res.status(500).send(
+                'Salesforce OAuth token exchange failed.'
+            );
+        }
+
+        /*
+         * Salesforce's identity URL contains the organization
+         * and user IDs. Retrieve them from the authenticated
+         * identity endpoint rather than parsing assumptions
+         * into the token response.
+         */
+        let salesforceOrgId: string | null = null;
+        let salesforceUserId: string | null = null;
+
+        if (tokenData.id) {
+            const identityResponse =
+                await fetch(
+                    tokenData.id,
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${tokenData.access_token}`
+                        }
+                    }
+                );
+
+            if (identityResponse.ok) {
+                const identityData =
+                    await identityResponse.json() as {
+                        organization_id?: string;
+                        user_id?: string;
+                    };
+
+                salesforceOrgId =
+                    identityData.organization_id ?? null;
+
+                salesforceUserId =
+                    identityData.user_id ?? null;
+            } else {
+                console.warn(
+                    '[SALESFORCE IDENTITY LOOKUP FAILED]',
+                    {
+                        status:
+                            identityResponse.status
+                    }
+                );
+            }
+        }
+
+        const accessTokenEncrypted =
+            encrypt(tokenData.access_token);
+
+        const refreshTokenEncrypted =
+            tokenData.refresh_token
+                ? encrypt(tokenData.refresh_token)
+                : null;
+
+        await db.query(
+            `
+            INSERT INTO salesforce_connections (
+                installation_id,
+                salesforce_org_id,
+                salesforce_user_id,
+                instance_url,
+                access_token_encrypted,
+                refresh_token_encrypted,
+                scope
+            )
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7
+            )
+            ON CONFLICT (installation_id)
+            DO UPDATE SET
+                salesforce_org_id =
+                    EXCLUDED.salesforce_org_id,
+                salesforce_user_id =
+                    EXCLUDED.salesforce_user_id,
+                instance_url =
+                    EXCLUDED.instance_url,
+                access_token_encrypted =
+                    EXCLUDED.access_token_encrypted,
+                refresh_token_encrypted =
+                    COALESCE(
+                        EXCLUDED.refresh_token_encrypted,
+                        salesforce_connections
+                            .refresh_token_encrypted
+                    ),
+                scope =
+                    EXCLUDED.scope,
+                updated_at = NOW()
+            `,
+            [
+                oauthAttempt.installationId,
+                salesforceOrgId,
+                salesforceUserId,
+                tokenData.instance_url,
+                accessTokenEncrypted,
+                refreshTokenEncrypted,
+                tokenData.scope ?? null
+            ]
+        );
+
+        console.log(
+            '[SALESFORCE OAUTH SUCCESS]',
+            {
+                installationId:
+                    oauthAttempt.installationId,
+                hasOrgId:
+                    Boolean(salesforceOrgId),
+                hasUserId:
+                    Boolean(salesforceUserId),
+                hasRefreshToken:
+                    Boolean(tokenData.refresh_token)
+            }
+        );
+
+        return res.status(200).send(`
+            <html>
+                <body style="
+                    font-family: Arial, sans-serif;
+                    padding: 40px;
+                    text-align: center;
+                ">
+                    <h1>Communik8 connected successfully</h1>
+                    <p>
+                        Salesforce authorization was completed.
+                    </p>
+                    <p>You can close this window.</p>
+                </body>
+            </html>
+        `);
+    } catch (error) {
+        console.error(
+            '[SALESFORCE OAUTH CALLBACK ERROR]',
+            error
+        );
+
+        return res.status(500).send(
+            'An unexpected error occurred while connecting Salesforce.'
         );
     }
 });
