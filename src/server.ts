@@ -17,6 +17,10 @@ import {
 
 import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
 
+import {
+    createSalesforceOAuthAttempt
+} from './salesforceOAuthService.js';
+
 dotenv.config();
 
 const app = express();
@@ -475,6 +479,107 @@ app.get('/auth/zoom/start/:installationId', async (req, res) => {
         );
     }
 });
+
+app.get(
+    '/auth/salesforce/start/:installationId',
+    async (req, res) => {
+        try {
+            const installationId =
+                req.params.installationId;
+
+            const uuidPattern =
+                /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+            if (!uuidPattern.test(installationId)) {
+                return res.status(404).send(
+                    'Communik8 installation not found.'
+                );
+            }
+
+            const installationResult =
+                await db.query(
+                    `
+                    SELECT id
+                    FROM installations
+                    WHERE id = $1
+                    LIMIT 1
+                    `,
+                    [installationId]
+                );
+
+            if (installationResult.rowCount !== 1) {
+                return res.status(404).send(
+                    'Communik8 installation not found.'
+                );
+            }
+
+            const clientId =
+                process.env.SALESFORCE_CLIENT_ID;
+
+            const redirectUri =
+                process.env.SALESFORCE_REDIRECT_URI;
+
+            if (!clientId || !redirectUri) {
+                return res.status(500).send(
+                    'Salesforce OAuth is not configured.'
+                );
+            }
+
+            const oauthAttempt =
+                await createSalesforceOAuthAttempt(
+                    installationId
+                );
+
+            const authorizeUrl =
+                new URL(
+                    `${oauthAttempt.loginUrl}/services/oauth2/authorize`
+                );
+
+            authorizeUrl.searchParams.set(
+                'response_type',
+                'code'
+            );
+
+            authorizeUrl.searchParams.set(
+                'client_id',
+                clientId
+            );
+
+            authorizeUrl.searchParams.set(
+                'redirect_uri',
+                redirectUri
+            );
+
+            authorizeUrl.searchParams.set(
+                'state',
+                oauthAttempt.state
+            );
+
+            authorizeUrl.searchParams.set(
+                'code_challenge',
+                oauthAttempt.codeChallenge
+            );
+
+            authorizeUrl.searchParams.set(
+                'code_challenge_method',
+                'S256'
+            );
+
+            return res.redirect(
+                authorizeUrl.toString()
+            );
+        } catch (error) {
+            console.error(
+                '[SALESFORCE OAUTH START ERROR]',
+                error
+            );
+
+            return res.status(500).send(
+                'Unable to start Salesforce authorization.'
+            );
+        }
+    }
+);
 
 app.listen(PORT, HOST, () => {
     console.log(
