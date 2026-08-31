@@ -3,7 +3,7 @@ import {
     refreshSalesforceAccessToken
 } from './salesforceTokenService.js';
 
-async function fetchSalesforce(
+export async function fetchSalesforce(
     installationId: string,
     path: string,
     init?: RequestInit
