@@ -32,7 +32,9 @@ export async function syncSmsMessagesForSession(
         SELECT
             id,
             zoom_session_id,
-            sync_token
+            sync_token,
+            salesforce_contact_id,
+            salesforce_account_id
         FROM zoom_sms_sessions
         WHERE id = $1
         AND installation_id = $2
@@ -56,6 +58,9 @@ export async function syncSmsMessagesForSession(
     const existingSyncToken =
         sessionResult.rows[0].sync_token;
 
+    const existingSalesforceContactId =
+        sessionResult.rows[0].salesforce_contact_id;
+
     const response =
         await syncSmsSession(
             installationId,
@@ -76,6 +81,69 @@ export async function syncSmsMessagesForSession(
         Array.isArray(response.sms_histories)
             ? response.sms_histories
             : [];
+
+    let salesforceMatch:
+        {
+            contactId: string;
+            accountId: string | null;
+        } | null = null;
+
+    if (!existingSalesforceContactId) {
+        const messageWithExternalPhone =
+            messages.find(
+                message =>
+                    Boolean(
+                        getExternalPhoneNumber(
+                            message
+                        )
+                    )
+            );
+
+        if (messageWithExternalPhone) {
+            const externalPhoneNumber =
+                getExternalPhoneNumber(
+                    messageWithExternalPhone
+                );
+
+            if (externalPhoneNumber) {
+                const matches =
+                    await findSalesforceContactsByPhone(
+                        installationId,
+                        externalPhoneNumber
+                    );
+
+                console.log(
+                    '[SALESFORCE SMS SESSION MATCH]',
+                    {
+                        installationId,
+                        smsSessionId,
+                        matchCount:
+                            matches.length,
+                        contactIds:
+                            matches.map(
+                                match => match.id
+                            ),
+                        accountIds:
+                            matches
+                                .map(
+                                    match =>
+                                        match.accountId
+                                )
+                                .filter(Boolean)
+                    }
+                );
+
+                if (matches.length === 1) {
+                    salesforceMatch = {
+                        contactId:
+                            matches[0].id,
+                        accountId:
+                            matches[0].accountId
+                    };
+                }
+            }
+        }
+    }
 
     const client = await db.connect();
 
@@ -155,41 +223,40 @@ export async function syncSmsMessagesForSession(
                 ]
             );
 
-            const externalPhoneNumber =
-                getExternalPhoneNumber(message);
-
-            if (externalPhoneNumber) {
-                const matches =
-                    await findSalesforceContactsByPhone(
-                        installationId,
-                        externalPhoneNumber
-                    );
-
-                console.log(
-                    '[SALESFORCE SMS CONTACT MATCH]',
-                    {
-                        installationId,
-                        smsSessionId,
-                        zoomMessageId:
-                            message.message_id,
-                        matchCount:
-                            matches.length,
-                        contactIds:
-                            matches.map(
-                                match => match.id
-                            ),
-                        accountIds:
-                            matches
-                                .map(
-                                    match =>
-                                        match.accountId
-                                )
-                                .filter(Boolean)
-                    }
-                );
-            }
-
             messagesProcessed += 1;
+        }
+
+        if (salesforceMatch) {
+            await client.query(
+                `
+                UPDATE zoom_sms_sessions
+                SET
+                    salesforce_contact_id = $1,
+                    salesforce_account_id = $2,
+                    salesforce_matched_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $3
+                AND installation_id = $4
+                `,
+                [
+                    salesforceMatch.contactId,
+                    salesforceMatch.accountId,
+                    smsSessionId,
+                    installationId
+                ]
+            );
+
+            console.log(
+                '[SALESFORCE SMS SESSION MATCH SAVED]',
+                {
+                    installationId,
+                    smsSessionId,
+                    contactId:
+                        salesforceMatch.contactId,
+                    accountId:
+                        salesforceMatch.accountId
+                }
+            );
         }
 
         if (response.sync_token) {
