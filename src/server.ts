@@ -26,6 +26,17 @@ import {
     encrypt
 } from './crypto.js';
 
+
+import {
+    authenticateSalesforceApiRequest,
+    getBearerToken
+} from './salesforceApiAuth.js';
+
+import {
+    getSmsConversationsForAccount,
+    getSmsConversationsForContact
+} from './salesforceSmsConversationService.js';
+
 dotenv.config();
 
 const app = express();
@@ -859,6 +870,174 @@ app.get(
             return res.status(500).send(
                 'Unable to start Salesforce authorization.'
             );
+        }
+    }
+);
+
+
+function isSalesforceRecordId(value: string): boolean {
+    return /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
+}
+
+async function resolveSalesforceApiInstallation(
+    req: express.Request
+): Promise<string | null> {
+    const installationHeader =
+        req.headers['x-communik8-installation-id'];
+
+    const installationId =
+        typeof installationHeader === 'string'
+            ? installationHeader
+            : undefined;
+
+    const authorizationHeader =
+        typeof req.headers.authorization === 'string'
+            ? req.headers.authorization
+            : undefined;
+
+    return authenticateSalesforceApiRequest(
+        installationId,
+        getBearerToken(authorizationHeader)
+    );
+}
+
+function parsePositiveIntegerQuery(
+    value: unknown
+): number | undefined {
+    if (typeof value !== 'string' || !value) {
+        return undefined;
+    }
+
+    const parsed = Number(value);
+
+    if (
+        !Number.isInteger(parsed) ||
+        parsed < 1
+    ) {
+        return undefined;
+    }
+
+    return parsed;
+}
+
+app.get(
+    '/api/salesforce/sms/contacts/:contactId/conversations',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const contactId = req.params.contactId;
+
+            if (!isSalesforceRecordId(contactId)) {
+                return res.status(400).json({
+                    error: 'Invalid Salesforce Contact ID'
+                });
+            }
+
+            const conversations =
+                await getSmsConversationsForContact(
+                    installationId,
+                    contactId,
+                    {
+                        sessionLimit:
+                            parsePositiveIntegerQuery(
+                                req.query.sessionLimit
+                            ),
+                        messageLimitPerSession:
+                            parsePositiveIntegerQuery(
+                                req.query.messageLimit
+                            )
+                    }
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.json({
+                contactId,
+                conversationCount:
+                    conversations.length,
+                conversations
+            });
+        } catch (error) {
+            console.error(
+                '[SALESFORCE SMS CONTACT CONVERSATIONS ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error: 'Unable to load SMS conversations'
+            });
+        }
+    }
+);
+
+app.get(
+    '/api/salesforce/sms/accounts/:accountId/conversations',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const accountId = req.params.accountId;
+
+            if (!isSalesforceRecordId(accountId)) {
+                return res.status(400).json({
+                    error: 'Invalid Salesforce Account ID'
+                });
+            }
+
+            const conversations =
+                await getSmsConversationsForAccount(
+                    installationId,
+                    accountId,
+                    {
+                        sessionLimit:
+                            parsePositiveIntegerQuery(
+                                req.query.sessionLimit
+                            ),
+                        messageLimitPerSession:
+                            parsePositiveIntegerQuery(
+                                req.query.messageLimit
+                            )
+                    }
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.json({
+                accountId,
+                conversationCount:
+                    conversations.length,
+                conversations
+            });
+        } catch (error) {
+            console.error(
+                '[SALESFORCE SMS ACCOUNT CONVERSATIONS ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error: 'Unable to load SMS conversations'
+            });
         }
     }
 );
