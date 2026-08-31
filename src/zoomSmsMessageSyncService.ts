@@ -1,5 +1,8 @@
 import { db } from './db.js';
 import { syncSmsSession } from './zoomPhoneService.js';
+import {
+    findSalesforceContactsByPhone
+} from './salesforceContactService.js';
 
 type ZoomSmsMessage = {
     sender?: unknown;
@@ -152,6 +155,40 @@ export async function syncSmsMessagesForSession(
                 ]
             );
 
+            const externalPhoneNumber =
+                getExternalPhoneNumber(message);
+
+            if (externalPhoneNumber) {
+                const matches =
+                    await findSalesforceContactsByPhone(
+                        installationId,
+                        externalPhoneNumber
+                    );
+
+                console.log(
+                    '[SALESFORCE SMS CONTACT MATCH]',
+                    {
+                        installationId,
+                        smsSessionId,
+                        zoomMessageId:
+                            message.message_id,
+                        matchCount:
+                            matches.length,
+                        contactIds:
+                            matches.map(
+                                match => match.id
+                            ),
+                        accountIds:
+                            matches
+                                .map(
+                                    match =>
+                                        match.accountId
+                                )
+                                .filter(Boolean)
+                    }
+                );
+            }
+
             messagesProcessed += 1;
         }
 
@@ -201,4 +238,33 @@ export async function syncSmsMessagesForSession(
     } finally {
         client.release();
     }
+}
+
+type ZoomSmsParty = {
+    phone_number?: string;
+};
+
+function getExternalPhoneNumber(
+    message: ZoomSmsMessage
+): string | null {
+    const direction =
+        message.direction?.toLowerCase();
+
+    if (direction === 'in') {
+        const sender =
+            message.sender as ZoomSmsParty | undefined;
+
+        return sender?.phone_number ?? null;
+    }
+
+    if (direction === 'out') {
+        const toMembers =
+            Array.isArray(message.to_members)
+                ? message.to_members as ZoomSmsParty[]
+                : [];
+
+        return toMembers[0]?.phone_number ?? null;
+    }
+
+    return null;
 }
