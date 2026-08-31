@@ -2,8 +2,8 @@ import crypto from 'crypto';
 
 import { db } from './db.js';
 import {
-    encryptValue,
-    decryptValue
+    encrypt,
+    decrypt
 } from './crypto.js';
 
 type SalesforceOAuthAttempt = {
@@ -64,7 +64,7 @@ export async function createSalesforceOAuthAttempt(
         hashState(state);
 
     const codeVerifierEncrypted =
-        encryptValue(codeVerifier);
+        encrypt(codeVerifier);
 
     await db.query(
         `
@@ -143,7 +143,7 @@ export async function consumeSalesforceOAuthAttempt(
                 result.rows[0].installation_id,
 
             codeVerifier:
-                decryptValue(
+                decrypt(
                     result.rows[0]
                         .code_verifier_encrypted
                 ),
