@@ -118,8 +118,16 @@ export async function publishCommunik8MessageEvent(
                 Boolean(options.contactId),
             hasAccountId:
                 Boolean(options.accountId),
+            status:
+                response.status,
             success:
-                responseBody?.success === true
+                responseBody?.success === true,
+            hasEventId:
+                Boolean(responseBody?.id),
+            errorCount:
+                Array.isArray(responseBody?.errors)
+                    ? responseBody.errors.length
+                    : 0
         }
     );
 }
