@@ -61,21 +61,66 @@ export async function syncSmsMessagesForSession(
     const existingSalesforceContactId =
         sessionResult.rows[0].salesforce_contact_id;
 
-    const response =
-        await syncSmsSession(
-            installationId,
-            zoomSessionId,
-            existingSyncToken
-                ? {
-                    syncType: 'ISync',
-                    count: 100,
-                    syncToken: existingSyncToken
+    let response: ZoomSmsSyncResponse;
+
+    let syncType: 'FSync' | 'ISync' =
+        existingSyncToken ? 'ISync' : 'FSync';
+
+    try {
+        response =
+            await syncSmsSession(
+                installationId,
+                zoomSessionId,
+                existingSyncToken
+                    ? {
+                        syncType: 'ISync',
+                        count: 100,
+                        syncToken: existingSyncToken
+                    }
+                    : {
+                        syncType: 'FSync',
+                        count: 100
+                    }
+            ) as ZoomSmsSyncResponse;
+    } catch (error) {
+        const zoomError = error as Error & {
+            zoomCode?: number;
+            zoomStatus?: number;
+        };
+
+        /*
+        * Zoom returns code 300 when an ISync token
+        * has expired or is no longer valid.
+        *
+        * Recover automatically with a fresh full sync.
+        */
+        if (
+            existingSyncToken &&
+            zoomError.zoomCode === 300
+        ) {
+            console.warn(
+                '[ZOOM SMS SYNC TOKEN EXPIRED]',
+                {
+                    installationId,
+                    smsSessionId
                 }
-                : {
-                    syncType: 'FSync',
-                    count: 100
-                }
-        ) as ZoomSmsSyncResponse;
+            );
+
+            syncType = 'FSync';
+
+            response =
+                await syncSmsSession(
+                    installationId,
+                    zoomSessionId,
+                    {
+                        syncType: 'FSync',
+                        count: 100
+                    }
+                ) as ZoomSmsSyncResponse;
+        } else {
+            throw error;
+        }
+    }
 
     const messages =
         Array.isArray(response.sms_histories)
@@ -280,10 +325,7 @@ export async function syncSmsMessagesForSession(
         console.log('[ZOOM SMS MESSAGE SYNC SUCCESS]', {
             installationId,
             smsSessionId,
-            syncType:
-                existingSyncToken
-                    ? 'ISync'
-                    : 'FSync',
+            syncType,
             messagesProcessed,
             syncTokenSaved:
                 Boolean(response.sync_token)
