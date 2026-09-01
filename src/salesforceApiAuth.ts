@@ -29,12 +29,36 @@ export async function authenticateSalesforceApiRequest(
     installationId: string | undefined,
     bearerToken: string | null
 ): Promise<string | null> {
+    const hasInstallationId = Boolean(installationId);
+    const installationIdValid =
+        Boolean(installationId) &&
+        UUID_PATTERN.test(installationId!);
+
+    const hasBearerToken = Boolean(bearerToken);
+    const bearerTokenLengthValid =
+        Boolean(bearerToken) &&
+        bearerToken!.length >= 32;
+
+    console.log('[SALESFORCE API AUTH REQUEST]', {
+        hasInstallationId,
+        installationIdValid,
+        hasBearerToken,
+        bearerTokenLengthValid
+    });
+
     if (
         !installationId ||
-        !UUID_PATTERN.test(installationId) ||
+        !installationIdValid ||
         !bearerToken ||
-        bearerToken.length < 32
+        !bearerTokenLengthValid
     ) {
+        console.warn('[SALESFORCE API AUTH REJECTED BEFORE DB]', {
+            hasInstallationId,
+            installationIdValid,
+            hasBearerToken,
+            bearerTokenLengthValid
+        });
+
         return null;
     }
 
@@ -56,7 +80,14 @@ export async function authenticateSalesforceApiRequest(
         ]
     );
 
-    return result.rowCount === 1
+    const matched = result.rowCount === 1;
+
+    console.log('[SALESFORCE API AUTH DB RESULT]', {
+        installationId,
+        matched
+    });
+
+    return matched
         ? result.rows[0].id
         : null;
 }
