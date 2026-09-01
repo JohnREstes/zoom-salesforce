@@ -37,6 +37,10 @@ import {
     getSmsConversationsForContact
 } from './salesforceSmsConversationService.js';
 
+import {
+    sendSmsForSalesforceContact
+} from './salesforceSmsSendService.js';
+
 dotenv.config();
 
 const app = express();
@@ -976,6 +980,127 @@ app.get(
 
             return res.status(500).json({
                 error: 'Unable to load SMS conversations'
+            });
+        }
+    }
+);
+
+app.post(
+    '/api/salesforce/sms/contacts/:contactId/messages',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const contactId = req.params.contactId;
+
+            if (!isSalesforceRecordId(contactId)) {
+                return res.status(400).json({
+                    error: 'Invalid Salesforce Contact ID'
+                });
+            }
+
+            const message =
+                typeof req.body?.message === 'string'
+                    ? req.body.message.trim()
+                    : '';
+
+            if (!message) {
+                return res.status(400).json({
+                    error: 'Message is required'
+                });
+            }
+
+            if (message.length > 2000) {
+                return res.status(400).json({
+                    error: 'Message is too long'
+                });
+            }
+
+            const result =
+                await sendSmsForSalesforceContact(
+                    installationId,
+                    contactId,
+                    message
+                );
+
+            /*
+             * Pull the sent message back through Zoom sync so
+             * Communik8's local conversation history remains
+             * authoritative immediately after sending.
+             */
+            try {
+                await syncSmsMessagesForSession(
+                    installationId,
+                    result.smsSessionId
+                );
+            } catch (syncError) {
+                console.warn(
+                    '[SALESFORCE SMS POST-SEND SYNC FAILED]',
+                    {
+                        installationId,
+                        smsSessionId:
+                            result.smsSessionId
+                    }
+                );
+            }
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.status(201).json({
+                success: true,
+                smsSessionId:
+                    result.smsSessionId,
+                zoomMessageId:
+                    result.zoomMessageId
+            });
+        } catch (error) {
+            console.error(
+                '[SALESFORCE SMS SEND ERROR]',
+                error
+            );
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : '';
+
+            if (
+                message.includes(
+                    'No matched SMS conversation'
+                )
+            ) {
+                return res.status(404).json({
+                    error:
+                        'No SMS conversation found for Contact'
+                });
+            }
+
+            if (
+                message.includes(
+                    'one-to-one conversation'
+                ) ||
+                message.includes(
+                    'exactly one sender'
+                )
+            ) {
+                return res.status(409).json({
+                    error:
+                        'SMS conversation cannot be safely resolved'
+                });
+            }
+
+            return res.status(500).json({
+                error: 'Unable to send SMS message'
             });
         }
     }
