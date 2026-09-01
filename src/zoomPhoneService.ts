@@ -149,3 +149,100 @@ export async function syncSmsSession(
 
     return responseBody;
 }
+
+export async function sendSmsMessage(
+    installationId: string,
+    options: {
+        fromPhoneNumber: string;
+        toPhoneNumber: string;
+        message: string;
+        senderUserId?: string;
+    }
+): Promise<any> {
+    const accessToken =
+        await getValidZoomAccessToken(installationId);
+
+    const message = options.message.trim();
+
+    if (!message) {
+        throw new Error('SMS message cannot be empty');
+    }
+
+    if (
+        !options.fromPhoneNumber ||
+        !options.toPhoneNumber
+    ) {
+        throw new Error(
+            'SMS sender and recipient are required'
+        );
+    }
+
+    const response = await fetch(
+        `${ZOOM_API_BASE_URL}/phone/sms/messages`,
+        {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                to_members: [
+                    {
+                        phone_number:
+                            options.toPhoneNumber
+                    }
+                ],
+                message,
+                sender: {
+                    user_id:
+                        options.senderUserId ?? 'me',
+                    phone_number:
+                        options.fromPhoneNumber
+                }
+            })
+        }
+    );
+
+    const responseBody =
+        await response.json().catch(() => null);
+
+    if (!response.ok) {
+        console.error('[ZOOM SMS SEND FAILED]', {
+            installationId,
+            status: response.status,
+            zoomCode:
+                typeof responseBody === 'object' &&
+                responseBody !== null
+                    ? responseBody.code
+                    : undefined
+        });
+
+        const error = new Error(
+            `Zoom SMS send failed with status ${response.status}`
+        ) as Error & {
+            zoomCode?: number;
+            zoomStatus?: number;
+        };
+
+        error.zoomCode =
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            typeof responseBody.code === 'number'
+                ? responseBody.code
+                : undefined;
+
+        error.zoomStatus = response.status;
+
+        throw error;
+    }
+
+    console.log('[ZOOM SMS SEND SUCCESS]', {
+        installationId,
+        hasMessageId: Boolean(
+            responseBody?.message_id
+        )
+    });
+
+    return responseBody;
+}
