@@ -41,6 +41,10 @@ import {
     sendSmsForSalesforceContact
 } from './salesforceSmsSendService.js';
 
+import {
+    publishCommunik8MessageEvent
+} from './salesforcePlatformEventService.js';
+
 dotenv.config();
 
 const app = express();
@@ -258,6 +262,77 @@ async function handleZoomWebhook(
                         syncTokenSaved:
                             syncResult.syncTokenSaved
                     });
+                    if (
+                        event.event === 'phone.sms_received' &&
+                        syncResult.messagesProcessed > 0
+                    ) {
+                        try {
+                            const matchResult =
+                                await db.query<{
+                                    salesforce_contact_id: string | null;
+                                    salesforce_account_id: string | null;
+                                }>(
+                                    `
+                                    SELECT
+                                        salesforce_contact_id,
+                                        salesforce_account_id
+                                    FROM zoom_sms_sessions
+                                    WHERE id = $1
+                                    AND installation_id = $2
+                                    LIMIT 1
+                                    `,
+                                    [
+                                        smsSessionId,
+                                        installation.id
+                                    ]
+                                );
+
+                            const match =
+                                matchResult.rows[0];
+
+                            if (match?.salesforce_contact_id) {
+                                await publishCommunik8MessageEvent(
+                                    installation.id,
+                                    {
+                                        contactId:
+                                            match.salesforce_contact_id,
+                                        accountId:
+                                            match.salesforce_account_id,
+                                        smsSessionId,
+                                        eventType: 'SMS_RECEIVED'
+                                    }
+                                );
+                            } else {
+                                console.log(
+                                    '[SALESFORCE PLATFORM EVENT SKIPPED]',
+                                    {
+                                        installationId:
+                                            installation.id,
+                                        smsSessionId,
+                                        reason:
+                                            'No matched Salesforce Contact'
+                                    }
+                                );
+                            }
+
+                        } catch (error) {
+                            /*
+                            * Salesforce notification is best-effort.
+                            *
+                            * Never make Zoom retry a webhook just because
+                            * Salesforce notification failed after the SMS
+                            * was already synchronized successfully.
+                            */
+                            console.warn(
+                                '[SALESFORCE PLATFORM EVENT NOTIFICATION FAILED]',
+                                {
+                                    installationId:
+                                        installation.id,
+                                    smsSessionId
+                                }
+                            );
+                        }
+                    }
                 } catch (error) {
                     const zoomError = error as Error & {
                         zoomCode?: number;
