@@ -127,7 +127,14 @@ export async function publishCommunik8MessageEvent(
             errorCount:
                 Array.isArray(responseBody?.errors)
                     ? responseBody.errors.length
-                    : 0
+                    : 0,
+            publishResults:
+                Array.isArray(responseBody?.errors)
+                    ? responseBody.errors.map((item: any) => ({
+                        statusCode: item?.statusCode,
+                        message: item?.message
+                    }))
+                    : []
         }
     );
 }
