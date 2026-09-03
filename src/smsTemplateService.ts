@@ -1,4 +1,4 @@
-import { pool } from './db';
+import { db } from './db.js';
 
 export type SmsTemplateScope = 'PERSONAL' | 'SHARED';
 
@@ -44,7 +44,7 @@ export async function getSmsTemplates(
     installationId: string,
     salesforceUserId: string
 ): Promise<SmsTemplate[]> {
-    const result = await pool.query<SmsTemplateRow>(
+    const result = await db.query<SmsTemplateRow>(
         `
         SELECT
             id,
@@ -99,7 +99,7 @@ export async function createSmsTemplate(
         throw new Error('Invalid template scope.');
     }
 
-    const result = await pool.query<SmsTemplateRow>(
+    const result = await db.query<SmsTemplateRow>(
         `
         INSERT INTO sms_templates (
             installation_id,
@@ -150,7 +150,7 @@ export async function updateSmsTemplate(
         throw new Error('Template body is required.');
     }
 
-    const result = await pool.query<SmsTemplateRow>(
+    const result = await db.query<SmsTemplateRow>(
         `
         UPDATE sms_templates
         SET
@@ -199,7 +199,7 @@ export async function deleteSmsTemplate(
     salesforceUserId: string,
     templateId: string
 ): Promise<void> {
-    const result = await pool.query(
+    const result = await db.query(
         `
         UPDATE sms_templates
         SET
