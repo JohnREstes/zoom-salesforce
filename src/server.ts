@@ -1073,7 +1073,108 @@ app.get(
     }
 );
 
+app.post(
+    '/api/salesforce/sms/templates',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
 
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
+            const name =
+                typeof req.body?.name === 'string'
+                    ? req.body.name.trim()
+                    : '';
+
+            const body =
+                typeof req.body?.body === 'string'
+                    ? req.body.body.trim()
+                    : '';
+
+            if (!name) {
+                return res.status(400).json({
+                    error: 'Template name is required'
+                });
+            }
+
+            if (!body) {
+                return res.status(400).json({
+                    error: 'Template body is required'
+                });
+            }
+
+            if (name.length > 150) {
+                return res.status(400).json({
+                    error: 'Template name is too long'
+                });
+            }
+
+            if (body.length > 2000) {
+                return res.status(400).json({
+                    error: 'Template body is too long'
+                });
+            }
+
+            const template =
+                await createSmsTemplate(
+                    installationId,
+                    salesforceUserId,
+                    'PERSONAL',
+                    name,
+                    body
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.status(201).json({
+                success: true,
+                template
+            });
+
+        } catch (error) {
+            console.error(
+                '[SALESFORCE SMS TEMPLATE CREATE ERROR]',
+                error
+            );
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : '';
+
+            if (
+                message.includes('duplicate key') ||
+                message.includes('unique constraint')
+            ) {
+                return res.status(409).json({
+                    error:
+                        'A personal template with that name already exists'
+                });
+            }
+
+            return res.status(500).json({
+                error: 'Unable to create SMS template'
+            });
+        }
+    }
+);
 
 app.get(
     '/api/salesforce/sms/contacts/:contactId/conversations',
