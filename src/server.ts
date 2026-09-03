@@ -1023,6 +1023,59 @@ function parsePositiveIntegerQuery(
 }
 
 app.get(
+    '/api/salesforce/sms/templates',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
+            const templates =
+                await getSmsTemplates(
+                    installationId,
+                    salesforceUserId
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.json({
+                templateCount: templates.length,
+                templates
+            });
+
+        } catch (error) {
+            console.error(
+                '[SALESFORCE SMS TEMPLATES ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error: 'Unable to load SMS templates'
+            });
+        }
+    }
+);
+
+
+
+app.get(
     '/api/salesforce/sms/contacts/:contactId/conversations',
     async (req, res) => {
         try {
