@@ -45,6 +45,14 @@ import {
     publishCommunik8MessageEvent
 } from './salesforcePlatformEventService.js';
 
+import {
+    createSmsTemplate,
+    deleteSmsTemplate,
+    getSmsTemplates,
+    updateSmsTemplate,
+    type SmsTemplateScope
+} from './smsTemplateService.js';
+
 dotenv.config();
 
 const app = express();
@@ -957,6 +965,22 @@ function isSalesforceRecordId(value: string): boolean {
     return /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
 }
 
+function getSalesforceUserId(
+    req: express.Request
+): string | null {
+    const value =
+        req.headers['x-communik8-salesforce-user-id'];
+
+    if (
+        typeof value !== 'string' ||
+        !isSalesforceRecordId(value)
+    ) {
+        return null;
+    }
+
+    return value;
+}
+
 async function resolveSalesforceApiInstallation(
     req: express.Request
 ): Promise<string | null> {
@@ -1240,6 +1264,8 @@ app.get(
         }
     }
 );
+
+
 
 app.listen(PORT, HOST, () => {
     console.log(
