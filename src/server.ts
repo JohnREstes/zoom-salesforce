@@ -1176,6 +1176,90 @@ app.post(
     }
 );
 
+app.delete(
+    '/api/salesforce/sms/templates/:templateId',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
+            const templateId =
+                typeof req.params.templateId === 'string'
+                    ? req.params.templateId.trim()
+                    : '';
+
+            if (!templateId) {
+                return res.status(400).json({
+                    error: 'Template ID is required'
+                });
+            }
+
+            /*
+             * Verify that this is an active PERSONAL template
+             * owned by the current Salesforce user.
+             *
+             * Do not expose SHARED template deletion through
+             * this user endpoint.
+             */
+            const templates =
+                await getSmsTemplates(
+                    installationId,
+                    salesforceUserId
+                );
+
+            const template =
+                templates.find(
+                    item =>
+                        item.id === templateId &&
+                        item.scope === 'PERSONAL' &&
+                        item.createdBySalesforceUserId ===
+                            salesforceUserId
+                );
+
+            if (!template) {
+                return res.status(404).json({
+                    error: 'Personal template not found'
+                });
+            }
+
+            await deleteSmsTemplate(
+                installationId,
+                salesforceUserId,
+                templateId
+            );
+
+            return res.json({
+                success: true
+            });
+
+        } catch (error) {
+            console.error(
+                '[SALESFORCE PERSONAL TEMPLATE DELETE ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error: 'Unable to delete personal SMS template'
+            });
+        }
+    }
+);
+
 app.get(
     '/api/salesforce/sms/contacts/:contactId/conversations',
     async (req, res) => {
