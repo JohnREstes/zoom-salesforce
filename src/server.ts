@@ -1260,6 +1260,145 @@ app.delete(
     }
 );
 
+app.put(
+    '/api/salesforce/sms/templates/:templateId',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
+            const templateId =
+                typeof req.params.templateId === 'string'
+                    ? req.params.templateId.trim()
+                    : '';
+
+            const name =
+                typeof req.body?.name === 'string'
+                    ? req.body.name.trim()
+                    : '';
+
+            const body =
+                typeof req.body?.body === 'string'
+                    ? req.body.body.trim()
+                    : '';
+
+            if (!templateId) {
+                return res.status(400).json({
+                    error: 'Template ID is required'
+                });
+            }
+
+            if (!name) {
+                return res.status(400).json({
+                    error: 'Template name is required'
+                });
+            }
+
+            if (!body) {
+                return res.status(400).json({
+                    error: 'Template body is required'
+                });
+            }
+
+            if (name.length > 150) {
+                return res.status(400).json({
+                    error: 'Template name is too long'
+                });
+            }
+
+            if (body.length > 2000) {
+                return res.status(400).json({
+                    error: 'Template body is too long'
+                });
+            }
+
+            /*
+             * Only allow this Salesforce user to update
+             * one of their own PERSONAL templates.
+             */
+            const templates =
+                await getSmsTemplates(
+                    installationId,
+                    salesforceUserId
+                );
+
+            const existingTemplate =
+                templates.find(
+                    item =>
+                        item.id === templateId &&
+                        item.scope === 'PERSONAL' &&
+                        item.createdBySalesforceUserId ===
+                            salesforceUserId
+                );
+
+            if (!existingTemplate) {
+                return res.status(404).json({
+                    error: 'Personal template not found'
+                });
+            }
+
+            const template =
+                await updateSmsTemplate(
+                    installationId,
+                    salesforceUserId,
+                    templateId,
+                    name,
+                    body
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.json({
+                success: true,
+                template
+            });
+
+        } catch (error) {
+            console.error(
+                '[SALESFORCE PERSONAL TEMPLATE UPDATE ERROR]',
+                error
+            );
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : '';
+
+            if (
+                message.includes('duplicate key') ||
+                message.includes('unique constraint')
+            ) {
+                return res.status(409).json({
+                    error:
+                        'A personal template with that name already exists'
+                });
+            }
+
+            return res.status(500).json({
+                error: 'Unable to update personal SMS template'
+            });
+        }
+    }
+);
+
 app.get(
     '/api/salesforce/sms/contacts/:contactId/conversations',
     async (req, res) => {
