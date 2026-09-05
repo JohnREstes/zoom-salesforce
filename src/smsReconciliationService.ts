@@ -11,6 +11,8 @@ type ReconciliationSessionRow = {
     installation_id: string;
     salesforce_contact_id: string | null;
     salesforce_account_id: string | null;
+    is_priority_reconciliation: boolean;
+    has_participants: boolean;
 };
 
 const RECONCILIATION_INTERVAL_MS = 60_000;
@@ -30,7 +32,16 @@ Promise<ReconciliationSessionRow[]> {
                 s.id,
                 s.installation_id,
                 s.salesforce_contact_id,
-                s.salesforce_account_id
+                s.salesforce_account_id,
+                (
+                    s.reconcile_until IS NOT NULL
+                    AND s.reconcile_until > NOW()
+                ) AS is_priority_reconciliation,
+                EXISTS (
+                    SELECT 1
+                    FROM zoom_sms_participants existing_participant
+                    WHERE existing_participant.sms_session_id = s.id
+                ) AS has_participants
             FROM zoom_sms_sessions s
             WHERE
                 s.last_access_time >=
@@ -58,6 +69,11 @@ Promise<ReconciliationSessionRow[]> {
                     NOW() - INTERVAL '30 seconds'
 
             ORDER BY
+                (
+                    s.reconcile_until IS NOT NULL
+                    AND s.reconcile_until > NOW()
+                ) DESC,
+                s.reconcile_until DESC NULLS LAST,
                 s.created_at DESC,
                 s.last_access_time DESC NULLS LAST,
                 s.id DESC
@@ -83,26 +99,41 @@ async function reconcileSmsSession(
                 session.id
             );
 
-        const participantSyncResult =
-            await syncSmsSessionSnapshot(
-                session.installation_id,
-                session.id
-            );
+        let participantSyncResult = {
+            found: session.has_participants,
+            pagesProcessed: 0,
+            participantsProcessed: 0
+        };
 
         let participantRecoveryResult = {
             recovered: false,
-            participantsProcessed:
-                participantSyncResult.participantsProcessed
+            participantsProcessed: 0
         };
 
-        if (
-            participantSyncResult.participantsProcessed === 0
-        ) {
-            participantRecoveryResult =
-                await recoverSmsParticipantsFromMessages(
+        /*
+         * Participant snapshot lookup is expensive because Zoom does
+         * not provide a direct "get this SMS session" endpoint here.
+         *
+         * A normal webhook reconciliation for an established
+         * conversation already has participants, so do not rescan
+         * Zoom's paginated session index on every retry.
+         */
+        if (!session.has_participants) {
+            participantSyncResult =
+                await syncSmsSessionSnapshot(
                     session.installation_id,
                     session.id
                 );
+
+            if (
+                participantSyncResult.participantsProcessed === 0
+            ) {
+                participantRecoveryResult =
+                    await recoverSmsParticipantsFromMessages(
+                        session.installation_id,
+                        session.id
+                    );
+            }
         }
 
         /*
@@ -138,10 +169,14 @@ async function reconcileSmsSession(
                 session.installation_id,
             smsSessionId:
                 session.id,
+            priorityReconciliation:
+                session.is_priority_reconciliation,
             messagesProcessed:
                 syncResult.messagesProcessed,
             syncTokenSaved:
                 syncResult.syncTokenSaved,
+            participantSnapshotSkipped:
+                session.has_participants,
             participantSnapshotFound:
                 participantSyncResult.found,
             participantsRecoveredFromMessage:
