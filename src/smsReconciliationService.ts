@@ -2,7 +2,8 @@ import { db } from './db.js';
 import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
 import { publishCommunik8MessageEvent } from './salesforcePlatformEventService.js';
 import {
-    syncSmsSessionSnapshot
+    syncSmsSessionSnapshot,
+    recoverSmsParticipantsFromMessages
 } from './zoomSmsSyncService.js';
 
 type ReconciliationSessionRow = {
@@ -35,15 +36,21 @@ Promise<ReconciliationSessionRow[]> {
                 s.last_access_time >=
                     NOW() - ($1 * INTERVAL '1 hour')
 
-                AND (
-                    s.sync_token IS NULL
+            AND (
+                s.sync_token IS NULL
 
-                    OR NOT EXISTS (
-                        SELECT 1
-                        FROM zoom_sms_messages m
-                        WHERE m.sms_session_id = s.id
-                    )
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM zoom_sms_messages m
+                    WHERE m.sms_session_id = s.id
                 )
+
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM zoom_sms_participants p
+                    WHERE p.sms_session_id = s.id
+                )
+            )
 
                 AND s.updated_at <=
                     NOW() - INTERVAL '30 seconds'
@@ -79,6 +86,22 @@ async function reconcileSmsSession(
                 session.installation_id,
                 session.id
             );
+
+        let participantRecoveryResult = {
+            recovered: false,
+            participantsProcessed:
+                participantSyncResult.participantsProcessed
+        };
+
+        if (
+            participantSyncResult.participantsProcessed === 0
+        ) {
+            participantRecoveryResult =
+                await recoverSmsParticipantsFromMessages(
+                    session.installation_id,
+                    session.id
+                );
+        }
 
         /*
          * Re-read the session after synchronization because
@@ -119,8 +142,13 @@ async function reconcileSmsSession(
                 syncResult.syncTokenSaved,
             participantSnapshotFound:
                 participantSyncResult.found,
+            participantsRecoveredFromMessage:
+                participantRecoveryResult.recovered,
             participantsProcessed:
-                participantSyncResult.participantsProcessed,
+                Math.max(
+                    participantSyncResult.participantsProcessed,
+                    participantRecoveryResult.participantsProcessed
+                ),
             hasSalesforceContact:
                 Boolean(
                     refreshed?.salesforce_contact_id

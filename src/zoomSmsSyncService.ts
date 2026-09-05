@@ -535,6 +535,314 @@ export async function ensureSmsSessionFromWebhook(
     };
 }
 
+export async function recoverSmsParticipantsFromMessages(
+    installationId: string,
+    smsSessionId: number
+): Promise<{
+    recovered: boolean;
+    participantsProcessed: number;
+}> {
+    const sessionResult =
+        await db.query(
+            `
+            SELECT id
+            FROM zoom_sms_sessions
+            WHERE id = $1
+              AND installation_id = $2
+            LIMIT 1
+            `,
+            [
+                smsSessionId,
+                installationId
+            ]
+        );
+
+    if (sessionResult.rowCount !== 1) {
+        throw new Error(
+            'SMS session not found for installation'
+        );
+    }
+
+    /*
+     * Find the newest persisted Zoom message that contains
+     * enough metadata to reconstruct a one-to-one session.
+     */
+    const messageResult =
+        await db.query<{
+            direction: string | null;
+            sender: unknown;
+            to_members: unknown;
+        }>(
+            `
+            SELECT
+                direction,
+                sender,
+                to_members
+            FROM zoom_sms_messages
+            WHERE sms_session_id = $1
+              AND sender IS NOT NULL
+              AND to_members IS NOT NULL
+            ORDER BY
+                message_date_time DESC NULLS LAST,
+                id DESC
+            LIMIT 10
+            `,
+            [smsSessionId]
+        );
+
+    for (const row of messageResult.rows) {
+        const direction =
+            row.direction?.toLowerCase();
+
+        if (
+            direction !== 'in' &&
+            direction !== 'out'
+        ) {
+            continue;
+        }
+
+        const sender =
+            asSmsParty(row.sender);
+
+        const toMembers =
+            asSmsPartyArray(row.to_members);
+
+        /*
+         * For v1 we only reconstruct standard one-to-one
+         * conversations. Never guess in a group conversation.
+         */
+        const recipients =
+            toMembers.filter(
+                member =>
+                    Boolean(member.phone_number)
+            );
+
+        if (
+            !sender?.phone_number ||
+            recipients.length !== 1
+        ) {
+            continue;
+        }
+
+        const recipient = recipients[0];
+
+        if (
+            recipient.phone_number ===
+            sender.phone_number
+        ) {
+            continue;
+        }
+
+        let owner: SmsRecoveredParty;
+        let external: SmsRecoveredParty;
+
+        if (direction === 'in') {
+            /*
+             * Incoming:
+             * sender = external person
+             * to_member = Communik8 / Zoom owner
+             */
+            external = sender;
+            owner = recipient;
+        } else {
+            /*
+             * Outgoing:
+             * sender = Communik8 / Zoom owner
+             * to_member = external person
+             */
+            owner = sender;
+            external = recipient;
+        }
+
+        const client = await db.connect();
+
+        try {
+            await client.query('BEGIN');
+
+            /*
+             * Only replace an empty participant snapshot.
+             * Do not overwrite a proper Zoom snapshot.
+             */
+            const existingResult =
+                await client.query(
+                    `
+                    SELECT COUNT(*)::int AS count
+                    FROM zoom_sms_participants
+                    WHERE sms_session_id = $1
+                    `,
+                    [smsSessionId]
+                );
+
+            const existingCount =
+                Number(
+                    existingResult.rows[0]?.count ?? 0
+                );
+
+            if (existingCount > 0) {
+                await client.query('ROLLBACK');
+
+                return {
+                    recovered: false,
+                    participantsProcessed:
+                        existingCount
+                };
+            }
+
+            await client.query(
+                `
+                INSERT INTO zoom_sms_participants (
+                    sms_session_id,
+                    owner_type,
+                    owner_id,
+                    is_session_owner,
+                    phone_number,
+                    display_name
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    TRUE,
+                    $4,
+                    NULL
+                )
+                `,
+                [
+                    smsSessionId,
+                    owner.owner?.type ?? null,
+                    owner.owner?.id ?? null,
+                    owner.phone_number
+                ]
+            );
+
+            await client.query(
+                `
+                INSERT INTO zoom_sms_participants (
+                    sms_session_id,
+                    owner_type,
+                    owner_id,
+                    is_session_owner,
+                    phone_number,
+                    display_name
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    FALSE,
+                    $4,
+                    NULL
+                )
+                `,
+                [
+                    smsSessionId,
+                    external.owner?.type ?? null,
+                    external.owner?.id ?? null,
+                    external.phone_number
+                ]
+            );
+
+            await client.query('COMMIT');
+
+            console.log(
+                '[ZOOM SMS PARTICIPANTS RECOVERED FROM MESSAGE]',
+                {
+                    installationId,
+                    smsSessionId,
+                    participantsProcessed: 2
+                }
+            );
+
+            return {
+                recovered: true,
+                participantsProcessed: 2
+            };
+        } catch (error) {
+            try {
+                await client.query('ROLLBACK');
+            } catch {
+                // Preserve original error.
+            }
+
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    console.log(
+        '[ZOOM SMS PARTICIPANT RECOVERY NOT POSSIBLE]',
+        {
+            installationId,
+            smsSessionId
+        }
+    );
+
+    return {
+        recovered: false,
+        participantsProcessed: 0
+    };
+}
+
+type SmsRecoveredParty = {
+    phone_number?: string;
+    owner?: {
+        type?: string;
+        id?: string;
+    };
+};
+
+function asSmsParty(
+    value: unknown
+): SmsRecoveredParty | null {
+    let parsed = value;
+
+    if (typeof parsed === 'string') {
+        try {
+            parsed = JSON.parse(parsed);
+        } catch {
+            return null;
+        }
+    }
+
+    if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        Array.isArray(parsed)
+    ) {
+        return null;
+    }
+
+    return parsed as SmsRecoveredParty;
+}
+
+function asSmsPartyArray(
+    value: unknown
+): SmsRecoveredParty[] {
+    let parsed = value;
+
+    if (typeof parsed === 'string') {
+        try {
+            parsed = JSON.parse(parsed);
+        } catch {
+            return [];
+        }
+    }
+
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+
+    return parsed
+        .map(item => asSmsParty(item))
+        .filter(
+            (
+                item
+            ): item is SmsRecoveredParty =>
+                item !== null
+        );
+}
+
 export async function cleanupEmptyWebhookSmsSession(
     installationId: string,
     smsSessionId: number
