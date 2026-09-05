@@ -185,6 +185,225 @@ export async function syncSmsSessions(
     };
 }
 
+export async function syncSmsSessionSnapshot(
+    installationId: string,
+    smsSessionId: number
+): Promise<{
+    found: boolean;
+    pagesProcessed: number;
+    participantsProcessed: number;
+}> {
+    const localResult =
+        await db.query<{
+            zoom_session_id: string;
+        }>(
+            `
+            SELECT zoom_session_id
+            FROM zoom_sms_sessions
+            WHERE id = $1
+              AND installation_id = $2
+            LIMIT 1
+            `,
+            [
+                smsSessionId,
+                installationId
+            ]
+        );
+
+    if (localResult.rowCount !== 1) {
+        throw new Error(
+            'SMS session not found for installation'
+        );
+    }
+
+    const zoomSessionId =
+        localResult.rows[0].zoom_session_id;
+
+    let nextPageToken: string | undefined;
+    let pagesProcessed = 0;
+
+    /*
+     * These sessions are recent, so they should normally be
+     * near the beginning of Zoom's session index.
+     *
+     * Do not scan an entire large Zoom account every minute.
+     */
+    const MAX_LOOKUP_PAGES = 10;
+
+    do {
+        const response =
+            await getSmsSessions(
+                installationId,
+                {
+                    pageSize: 100,
+                    nextPageToken
+                }
+            ) as ZoomSmsSessionsResponse;
+
+        pagesProcessed += 1;
+
+        const sessions =
+            Array.isArray(response.sms_sessions)
+                ? response.sms_sessions
+                : [];
+
+        const zoomSession =
+            sessions.find(
+                session =>
+                    session.session_id ===
+                    zoomSessionId
+            );
+
+        if (zoomSession) {
+            const client = await db.connect();
+
+            try {
+                await client.query('BEGIN');
+
+                await client.query(
+                    `
+                    UPDATE zoom_sms_sessions
+                    SET
+                        session_type =
+                            COALESCE(
+                                $1,
+                                session_type
+                            ),
+                        last_access_time =
+                            COALESCE(
+                                $2,
+                                last_access_time
+                            ),
+                        updated_at = NOW()
+                    WHERE id = $3
+                      AND installation_id = $4
+                    `,
+                    [
+                        zoomSession.session_type ?? null,
+                        zoomSession.last_access_time
+                            ? new Date(
+                                zoomSession.last_access_time
+                            )
+                            : null,
+                        smsSessionId,
+                        installationId
+                    ]
+                );
+
+                /*
+                 * Zoom is the source of truth for the current
+                 * participant snapshot.
+                 */
+                await client.query(
+                    `
+                    DELETE FROM zoom_sms_participants
+                    WHERE sms_session_id = $1
+                    `,
+                    [smsSessionId]
+                );
+
+                const participants =
+                    Array.isArray(
+                        zoomSession.participants
+                    )
+                        ? zoomSession.participants
+                        : [];
+
+                for (
+                    const participant of participants
+                ) {
+                    await client.query(
+                        `
+                        INSERT INTO zoom_sms_participants (
+                            sms_session_id,
+                            owner_type,
+                            owner_id,
+                            is_session_owner,
+                            phone_number,
+                            display_name
+                        )
+                        VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            $5,
+                            $6
+                        )
+                        `,
+                        [
+                            smsSessionId,
+                            participant.owner?.type ??
+                                null,
+                            participant.owner?.id ??
+                                null,
+                            participant.is_session_owner ??
+                                false,
+                            participant.phone_number ??
+                                null,
+                            participant.display_name ??
+                                null
+                        ]
+                    );
+                }
+
+                await client.query('COMMIT');
+
+                console.log(
+                    '[ZOOM SMS SESSION SNAPSHOT SYNCED]',
+                    {
+                        installationId,
+                        smsSessionId,
+                        pagesProcessed,
+                        participantsProcessed:
+                            participants.length
+                    }
+                );
+
+                return {
+                    found: true,
+                    pagesProcessed,
+                    participantsProcessed:
+                        participants.length
+                };
+            } catch (error) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch {
+                    // Preserve original error.
+                }
+
+                throw error;
+            } finally {
+                client.release();
+            }
+        }
+
+        nextPageToken =
+            response.next_page_token ||
+            undefined;
+
+    } while (
+        nextPageToken &&
+        pagesProcessed < MAX_LOOKUP_PAGES
+    );
+
+    console.log(
+        '[ZOOM SMS SESSION SNAPSHOT NOT FOUND]',
+        {
+            installationId,
+            smsSessionId,
+            pagesProcessed
+        }
+    );
+
+    return {
+        found: false,
+        pagesProcessed,
+        participantsProcessed: 0
+    };
+}
+
 export async function ensureSmsSessionFromWebhook(
     installationId: string,
     zoomSessionId: string,

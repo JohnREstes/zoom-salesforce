@@ -1,6 +1,9 @@
 import { db } from './db.js';
 import { syncSmsMessagesForSession } from './zoomSmsMessageSyncService.js';
 import { publishCommunik8MessageEvent } from './salesforcePlatformEventService.js';
+import {
+    syncSmsSessionSnapshot
+} from './zoomSmsSyncService.js';
 
 type ReconciliationSessionRow = {
     id: number;
@@ -71,6 +74,12 @@ async function reconcileSmsSession(
                 session.id
             );
 
+        const participantSyncResult =
+            await syncSmsSessionSnapshot(
+                session.installation_id,
+                session.id
+            );
+
         /*
          * Re-read the session after synchronization because
          * syncSmsMessagesForSession may have just attached a
@@ -108,6 +117,10 @@ async function reconcileSmsSession(
                 syncResult.messagesProcessed,
             syncTokenSaved:
                 syncResult.syncTokenSaved,
+            participantSnapshotFound:
+                participantSyncResult.found,
+            participantsProcessed:
+                participantSyncResult.participantsProcessed,
             hasSalesforceContact:
                 Boolean(
                     refreshed?.salesforce_contact_id
