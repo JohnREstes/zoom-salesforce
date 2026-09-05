@@ -40,7 +40,7 @@ export async function publishCommunik8MessageEvent(
         contactId?: string | null;
         accountId?: string | null;
         smsSessionId: number | string;
-        eventType: 'SMS_RECEIVED' | 'SMS_SENT';
+        eventType: 'SMS_RECEIVED' | 'SMS_SENT' | 'SMS_RECONCILED';
     }
 ): Promise<void> {
     const payload = {

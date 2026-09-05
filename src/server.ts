@@ -53,6 +53,10 @@ import {
     type SmsTemplateScope
 } from './smsTemplateService.js';
 
+import {
+    startSmsReconciliationWorker
+} from './smsReconciliationService.js';
+
 dotenv.config();
 
 const app = express();
@@ -1647,9 +1651,10 @@ app.get(
 );
 
 
-
 app.listen(PORT, HOST, () => {
     console.log(
         `Zoom Salesforce API listening on http://${HOST}:${PORT}`
     );
+
+    startSmsReconciliationWorker();
 });
