@@ -246,3 +246,76 @@ export async function sendSmsMessage(
 
     return responseBody;
 }
+
+export async function getZoomPhoneUsers(
+    installationId: string,
+    options: {
+        pageSize?: number;
+        nextPageToken?: string;
+    } = {}
+): Promise<any> {
+    const accessToken =
+        await getValidZoomAccessToken(installationId);
+
+    const url = new URL(
+        `${ZOOM_API_BASE_URL}/phone/users`
+    );
+
+    url.searchParams.set(
+        'page_size',
+        String(options.pageSize ?? 100)
+    );
+
+    if (options.nextPageToken) {
+        url.searchParams.set(
+            'next_page_token',
+            options.nextPageToken
+        );
+    }
+
+    const response = await fetch(
+        url.toString(),
+        {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json'
+            }
+        }
+    );
+
+    const responseBody =
+        await response.json().catch(() => null);
+
+    if (!response.ok) {
+        console.error('[ZOOM PHONE USERS FAILED]', {
+            installationId,
+            status: response.status,
+            zoomCode:
+                typeof responseBody === 'object' &&
+                responseBody !== null
+                    ? responseBody.code
+                    : undefined
+        });
+
+        const error = new Error(
+            `Zoom Phone users request failed with status ${response.status}`
+        ) as Error & {
+            zoomCode?: number;
+            zoomStatus?: number;
+        };
+
+        error.zoomCode =
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            typeof responseBody.code === 'number'
+                ? responseBody.code
+                : undefined;
+
+        error.zoomStatus = response.status;
+
+        throw error;
+    }
+
+    return responseBody;
+}
