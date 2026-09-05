@@ -22,7 +22,10 @@ type ZoomSmsSyncResponse = {
 
 export async function syncSmsMessagesForSession(
     installationId: string,
-    smsSessionId: number
+    smsSessionId: number,
+    options: {
+        forceFullSync?: boolean;
+    } = {}
 ): Promise<{
     messagesProcessed: number;
     messagesInserted: number;
@@ -64,14 +67,20 @@ export async function syncSmsMessagesForSession(
 
     let response: ZoomSmsSyncResponse;
 
+    const forceFullSync =
+        options.forceFullSync === true;
+
     let syncType: 'FSync' | 'ISync' =
-        existingSyncToken ? 'ISync' : 'FSync';
+        forceFullSync || !existingSyncToken
+            ? 'FSync'
+            : 'ISync';
 
     try {
         response =
             await syncSmsSession(
                 installationId,
                 zoomSessionId,
+                syncType === 'ISync' &&
                 existingSyncToken
                     ? {
                         syncType: 'ISync',
@@ -333,6 +342,7 @@ export async function syncSmsMessagesForSession(
             installationId,
             smsSessionId,
             syncType,
+            forcedFullSync: forceFullSync,
             messagesProcessed,
             messagesInserted,
             syncTokenSaved:

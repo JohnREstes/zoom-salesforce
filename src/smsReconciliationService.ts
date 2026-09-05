@@ -11,6 +11,10 @@ type ReconciliationSessionRow = {
     installation_id: string;
     salesforce_contact_id: string | null;
     salesforce_account_id: string | null;
+    is_priority_reconciliation: boolean;
+    has_participants: boolean;
+    reconcile_until: Date | null;
+    reconcile_fsync_attempted_at: Date | null;
 };
 
 const PRIORITY_RECONCILIATION_INTERVAL_MS = 10_000;
@@ -45,6 +49,8 @@ async function getSessionsNeedingReconciliation(
                 s.installation_id,
                 s.salesforce_contact_id,
                 s.salesforce_account_id,
+                s.reconcile_until,
+                s.reconcile_fsync_attempted_at,
                 (
                     s.reconcile_until IS NOT NULL
                     AND s.reconcile_until > NOW()
@@ -118,38 +124,157 @@ async function reconcileSmsSession(
     session: ReconciliationSessionRow
 ): Promise<void> {
     try {
-        const syncResult =
+        const initialSyncResult =
             await syncSmsMessagesForSession(
                 session.installation_id,
                 session.id
             );
 
-        const participantSyncResult =
-            await syncSmsSessionSnapshot(
-                session.installation_id,
-                session.id
-            );
+        let messagesProcessed =
+            initialSyncResult.messagesProcessed;
 
-        let participantRecoveryResult = {
-            recovered: false,
-            participantsProcessed:
-                participantSyncResult.participantsProcessed
-        };
+        let messagesInserted =
+            initialSyncResult.messagesInserted;
 
+        let syncTokenSaved =
+            initialSyncResult.syncTokenSaved;
+
+        let fsyncProbeAttempted = false;
+
+        /*
+         * Bounded FSync recovery probe.
+         *
+         * Zoom can emit the webhook before ISync exposes the
+         * corresponding message. During an active reconciliation
+         * window, if normal ISync still has not inserted anything
+         * after roughly 20 seconds, claim ONE FSync probe.
+         *
+         * The claim is persisted in PostgreSQL, so it remains safe
+         * across process restarts and multiple application instances.
+         * A later webhook extends reconcile_until, which creates a
+         * new logical window and permits one new probe.
+         */
         if (
-            participantSyncResult.participantsProcessed === 0
+            session.is_priority_reconciliation &&
+            messagesInserted === 0
         ) {
-            participantRecoveryResult =
-                await recoverSmsParticipantsFromMessages(
-                    session.installation_id,
-                    session.id
+            const probeClaim =
+                await db.query(
+                    `
+                    UPDATE zoom_sms_sessions
+                    SET
+                        reconcile_fsync_attempted_at = NOW()
+                    WHERE id = $1
+                      AND installation_id = $2
+                      AND reconcile_until IS NOT NULL
+                      AND reconcile_until > NOW()
+                      AND NOW() >=
+                          (
+                              reconcile_until
+                              - INTERVAL '5 minutes'
+                              + INTERVAL '20 seconds'
+                          )
+                      AND (
+                          reconcile_fsync_attempted_at IS NULL
+                          OR reconcile_fsync_attempted_at <
+                              (
+                                  reconcile_until
+                                  - INTERVAL '5 minutes'
+                              )
+                      )
+                    RETURNING id
+                    `,
+                    [
+                        session.id,
+                        session.installation_id
+                    ]
                 );
+
+            if (probeClaim.rowCount === 1) {
+                fsyncProbeAttempted = true;
+
+                console.log(
+                    '[SMS RECONCILIATION FSYNC PROBE]',
+                    {
+                        installationId:
+                            session.installation_id,
+                        smsSessionId:
+                            session.id
+                    }
+                );
+
+                const fullSyncResult =
+                    await syncSmsMessagesForSession(
+                        session.installation_id,
+                        session.id,
+                        {
+                            forceFullSync: true
+                        }
+                    );
+
+                messagesProcessed +=
+                    fullSyncResult.messagesProcessed;
+
+                messagesInserted +=
+                    fullSyncResult.messagesInserted;
+
+                syncTokenSaved =
+                    syncTokenSaved ||
+                    fullSyncResult.syncTokenSaved;
+            }
         }
 
         /*
-         * Re-read the session after synchronization because
-         * syncSmsMessagesForSession may have just attached a
-         * Salesforce Contact/Account.
+         * Participant snapshots are expensive because resolving a
+         * session can require scanning multiple Zoom session pages.
+         * Established conversations already have participants, so
+         * never repeat that work on the priority retry path.
+         */
+        let participantSnapshotSkipped =
+            session.has_participants;
+
+        let participantSnapshotFound =
+            session.has_participants;
+
+        let participantSnapshotParticipants = 0;
+
+        let participantsRecoveredFromMessage = false;
+
+        let recoveredParticipants = 0;
+
+        if (!session.has_participants) {
+            const participantSyncResult =
+                await syncSmsSessionSnapshot(
+                    session.installation_id,
+                    session.id
+                );
+
+            participantSnapshotFound =
+                participantSyncResult.found;
+
+            participantSnapshotParticipants =
+                participantSyncResult.participantsProcessed;
+
+            if (
+                participantSyncResult.participantsProcessed === 0
+            ) {
+                const participantRecoveryResult =
+                    await recoverSmsParticipantsFromMessages(
+                        session.installation_id,
+                        session.id
+                    );
+
+                participantsRecoveredFromMessage =
+                    participantRecoveryResult.recovered;
+
+                recoveredParticipants =
+                    participantRecoveryResult.participantsProcessed;
+            }
+        }
+
+        /*
+         * Re-read the Salesforce match after synchronization because
+         * syncSmsMessagesForSession may have just attached it.
          */
         const refreshedResult =
             await db.query<{
@@ -179,20 +304,19 @@ async function reconcileSmsSession(
                 session.installation_id,
             smsSessionId:
                 session.id,
-            messagesProcessed:
-                syncResult.messagesProcessed,
-            messagesInserted:
-                syncResult.messagesInserted,
-            syncTokenSaved:
-                syncResult.syncTokenSaved,
-            participantSnapshotFound:
-                participantSyncResult.found,
-            participantsRecoveredFromMessage:
-                participantRecoveryResult.recovered,
+            priorityReconciliation:
+                session.is_priority_reconciliation,
+            fsyncProbeAttempted,
+            messagesProcessed,
+            messagesInserted,
+            syncTokenSaved,
+            participantSnapshotSkipped,
+            participantSnapshotFound,
+            participantsRecoveredFromMessage,
             participantsProcessed:
                 Math.max(
-                    participantSyncResult.participantsProcessed,
-                    participantRecoveryResult.participantsProcessed
+                    participantSnapshotParticipants,
+                    recoveredParticipants
                 ),
             hasSalesforceContact:
                 Boolean(
@@ -201,14 +325,12 @@ async function reconcileSmsSession(
         });
 
         /*
-         * If reconciliation produced a usable Salesforce
-         * conversation, wake the Salesforce UI.
-         *
-         * The event carries routing metadata only.
+         * Only wake Salesforce when a genuinely new Communik8
+         * message row was inserted.
          */
         if (
             refreshed?.salesforce_contact_id &&
-            syncResult.messagesInserted > 0
+            messagesInserted > 0
         ) {
             try {
                 await publishCommunik8MessageEvent(
