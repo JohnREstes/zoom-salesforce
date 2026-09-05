@@ -31,20 +31,25 @@ Promise<ReconciliationSessionRow[]> {
             WHERE
                 s.last_access_time >=
                     NOW() - ($1 * INTERVAL '1 hour')
+
                 AND (
                     s.sync_token IS NULL
-                    OR s.salesforce_contact_id IS NULL
+
                     OR NOT EXISTS (
                         SELECT 1
                         FROM zoom_sms_messages m
                         WHERE m.sms_session_id = s.id
                     )
                 )
+
                 AND s.updated_at <=
                     NOW() - INTERVAL '30 seconds'
+
             ORDER BY
+                s.created_at DESC,
                 s.last_access_time DESC NULLS LAST,
                 s.id DESC
+
             LIMIT $2
             `,
             [
