@@ -50,6 +50,8 @@ Promise<ReconciliationSessionRow[]> {
                     FROM zoom_sms_participants p
                     WHERE p.sms_session_id = s.id
                 )
+
+                OR s.reconcile_until > NOW()
             )
 
                 AND s.updated_at <=
