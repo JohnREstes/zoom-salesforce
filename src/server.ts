@@ -293,8 +293,11 @@ async function handleZoomWebhook(
                             syncResult.syncTokenSaved
                     });
                     if (
-                        event.event === 'phone.sms_received' ||
-                        event.event === 'phone.sms_sent'
+                        syncResult.messagesInserted > 0 &&
+                        (
+                            event.event === 'phone.sms_received' ||
+                            event.event === 'phone.sms_sent'
+                        )
                     ) {
                         try {
                             const matchResult =
