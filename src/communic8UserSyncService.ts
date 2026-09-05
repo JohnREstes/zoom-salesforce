@@ -104,7 +104,7 @@ export async function syncCommunik8UsersFromZoom(
 
             const isActive =
                 String(zoomUser.status ?? '')
-                    .toLowerCase() === 'active';
+                    .toLowerCase() === 'activate';
 
             /*
              * For now, Communik8 only automatically selects a
