@@ -258,6 +258,24 @@ async function handleZoomWebhook(
                         : undefined
                 );
 
+                await db.query(
+                    `
+                    UPDATE zoom_sms_sessions
+                    SET
+                        reconcile_until = GREATEST(
+                            COALESCE(reconcile_until, NOW()),
+                            NOW() + INTERVAL '5 minutes'
+                        ),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    AND installation_id = $2
+                    `,
+                    [
+                        smsSessionId,
+                        installation.id
+                    ]
+                );
+
                 try {
                     const syncResult =
                         await syncSmsMessagesForSession(
