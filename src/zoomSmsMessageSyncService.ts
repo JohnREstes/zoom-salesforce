@@ -25,6 +25,7 @@ export async function syncSmsMessagesForSession(
     smsSessionId: number
 ): Promise<{
     messagesProcessed: number;
+    messagesInserted: number;
     syncTokenSaved: boolean;
 }> {
     const sessionResult = await db.query(
@@ -193,6 +194,7 @@ export async function syncSmsMessagesForSession(
     const client = await db.connect();
 
     let messagesProcessed = 0;
+    let messagesInserted = 0;
 
     try {
         await client.query('BEGIN');
@@ -202,7 +204,7 @@ export async function syncSmsMessagesForSession(
                 continue;
             }
 
-            await client.query(
+            const upsertResult = await client.query<{ inserted: boolean }>(
                 `
                 INSERT INTO zoom_sms_messages (
                     sms_session_id,
@@ -246,6 +248,7 @@ export async function syncSmsMessagesForSession(
                     attachments =
                         EXCLUDED.attachments,
                     updated_at = NOW()
+                RETURNING (xmax = 0) AS inserted
                 `,
                 [
                     smsSessionId,
@@ -269,6 +272,10 @@ export async function syncSmsMessagesForSession(
             );
 
             messagesProcessed += 1;
+
+            if (upsertResult.rows[0]?.inserted === true) {
+                messagesInserted += 1;
+            }
         }
 
         if (salesforceMatch) {
@@ -327,12 +334,14 @@ export async function syncSmsMessagesForSession(
             smsSessionId,
             syncType,
             messagesProcessed,
+            messagesInserted,
             syncTokenSaved:
                 Boolean(response.sync_token)
         });
 
         return {
             messagesProcessed,
+            messagesInserted,
             syncTokenSaved:
                 Boolean(response.sync_token)
         };

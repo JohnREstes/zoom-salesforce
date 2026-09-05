@@ -11,20 +11,32 @@ type ReconciliationSessionRow = {
     installation_id: string;
     salesforce_contact_id: string | null;
     salesforce_account_id: string | null;
-    is_priority_reconciliation: boolean;
-    has_participants: boolean;
 };
 
-const RECONCILIATION_INTERVAL_MS = 60_000;
-const RECONCILIATION_BATCH_SIZE = 25;
+const PRIORITY_RECONCILIATION_INTERVAL_MS = 10_000;
+const PRIORITY_RECONCILIATION_BATCH_SIZE = 10;
+const CLEANUP_RECONCILIATION_INTERVAL_MS = 60_000;
+const CLEANUP_RECONCILIATION_BATCH_SIZE = 25;
 const RECONCILIATION_LOOKBACK_HOURS = 24;
 
-let reconciliationRunning = false;
-let reconciliationTimer:
+let priorityReconciliationRunning = false;
+let cleanupReconciliationRunning = false;
+
+let priorityReconciliationTimer:
     ReturnType<typeof setInterval> | null = null;
 
-async function getSessionsNeedingReconciliation():
-Promise<ReconciliationSessionRow[]> {
+let cleanupReconciliationTimer:
+    ReturnType<typeof setInterval> | null = null;
+
+async function getSessionsNeedingReconciliation(
+    mode: 'priority' | 'cleanup'
+): Promise<ReconciliationSessionRow[]> {
+    const priorityOnly = mode === 'priority';
+    const minimumAgeSeconds = priorityOnly ? 5 : 30;
+    const batchSize = priorityOnly
+        ? PRIORITY_RECONCILIATION_BATCH_SIZE
+        : CLEANUP_RECONCILIATION_BATCH_SIZE;
+
     const result =
         await db.query<ReconciliationSessionRow>(
             `
@@ -47,42 +59,55 @@ Promise<ReconciliationSessionRow[]> {
                 s.last_access_time >=
                     NOW() - ($1 * INTERVAL '1 hour')
 
-            AND (
-                s.sync_token IS NULL
+                AND (
+                    (
+                        $2::boolean = TRUE
+                        AND s.reconcile_until > NOW()
+                    )
+                    OR
+                    (
+                        $2::boolean = FALSE
+                        AND (
+                            s.reconcile_until IS NULL
+                            OR s.reconcile_until <= NOW()
+                        )
+                        AND (
+                            s.sync_token IS NULL
 
-                OR NOT EXISTS (
-                    SELECT 1
-                    FROM zoom_sms_messages m
-                    WHERE m.sms_session_id = s.id
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM zoom_sms_messages m
+                                WHERE m.sms_session_id = s.id
+                            )
+
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM zoom_sms_participants p
+                                WHERE p.sms_session_id = s.id
+                            )
+                        )
+                    )
                 )
-
-                OR NOT EXISTS (
-                    SELECT 1
-                    FROM zoom_sms_participants p
-                    WHERE p.sms_session_id = s.id
-                )
-
-                OR s.reconcile_until > NOW()
-            )
 
                 AND s.updated_at <=
-                    NOW() - INTERVAL '30 seconds'
+                    NOW() - ($3 * INTERVAL '1 second')
 
             ORDER BY
-                (
-                    s.reconcile_until IS NOT NULL
-                    AND s.reconcile_until > NOW()
-                ) DESC,
-                s.reconcile_until DESC NULLS LAST,
-                s.created_at DESC,
+                CASE
+                    WHEN $2::boolean = TRUE
+                    THEN s.reconcile_until
+                    ELSE s.created_at
+                END DESC NULLS LAST,
                 s.last_access_time DESC NULLS LAST,
                 s.id DESC
 
-            LIMIT $2
+            LIMIT $4
             `,
             [
                 RECONCILIATION_LOOKBACK_HOURS,
-                RECONCILIATION_BATCH_SIZE
+                priorityOnly,
+                minimumAgeSeconds,
+                batchSize
             ]
         );
 
@@ -99,41 +124,26 @@ async function reconcileSmsSession(
                 session.id
             );
 
-        let participantSyncResult = {
-            found: session.has_participants,
-            pagesProcessed: 0,
-            participantsProcessed: 0
-        };
+        const participantSyncResult =
+            await syncSmsSessionSnapshot(
+                session.installation_id,
+                session.id
+            );
 
         let participantRecoveryResult = {
             recovered: false,
-            participantsProcessed: 0
+            participantsProcessed:
+                participantSyncResult.participantsProcessed
         };
 
-        /*
-         * Participant snapshot lookup is expensive because Zoom does
-         * not provide a direct "get this SMS session" endpoint here.
-         *
-         * A normal webhook reconciliation for an established
-         * conversation already has participants, so do not rescan
-         * Zoom's paginated session index on every retry.
-         */
-        if (!session.has_participants) {
-            participantSyncResult =
-                await syncSmsSessionSnapshot(
+        if (
+            participantSyncResult.participantsProcessed === 0
+        ) {
+            participantRecoveryResult =
+                await recoverSmsParticipantsFromMessages(
                     session.installation_id,
                     session.id
                 );
-
-            if (
-                participantSyncResult.participantsProcessed === 0
-            ) {
-                participantRecoveryResult =
-                    await recoverSmsParticipantsFromMessages(
-                        session.installation_id,
-                        session.id
-                    );
-            }
         }
 
         /*
@@ -169,14 +179,12 @@ async function reconcileSmsSession(
                 session.installation_id,
             smsSessionId:
                 session.id,
-            priorityReconciliation:
-                session.is_priority_reconciliation,
             messagesProcessed:
                 syncResult.messagesProcessed,
+            messagesInserted:
+                syncResult.messagesInserted,
             syncTokenSaved:
                 syncResult.syncTokenSaved,
-            participantSnapshotSkipped:
-                session.has_participants,
             participantSnapshotFound:
                 participantSyncResult.found,
             participantsRecoveredFromMessage:
@@ -200,7 +208,7 @@ async function reconcileSmsSession(
          */
         if (
             refreshed?.salesforce_contact_id &&
-            syncResult.messagesProcessed > 0
+            syncResult.messagesInserted > 0
         ) {
             try {
                 await publishCommunik8MessageEvent(
@@ -264,21 +272,58 @@ async function reconcileSmsSession(
     }
 }
 
+async function runPrioritySmsReconciliation():
+Promise<void> {
+    if (priorityReconciliationRunning) {
+        return;
+    }
+
+    priorityReconciliationRunning = true;
+
+    try {
+        const sessions =
+            await getSessionsNeedingReconciliation('priority');
+
+        if (sessions.length === 0) {
+            return;
+        }
+
+        console.log('[SMS PRIORITY RECONCILIATION START]', {
+            sessionCount: sessions.length
+        });
+
+        for (const session of sessions) {
+            await reconcileSmsSession(session);
+        }
+
+        console.log('[SMS PRIORITY RECONCILIATION COMPLETE]', {
+            sessionCount: sessions.length
+        });
+    } catch (error) {
+        console.error(
+            '[SMS PRIORITY RECONCILIATION WORKER FAILED]',
+            error
+        );
+    } finally {
+        priorityReconciliationRunning = false;
+    }
+}
+
 export async function runSmsReconciliation():
 Promise<void> {
-    if (reconciliationRunning) {
+    if (cleanupReconciliationRunning) {
         console.log(
-            '[SMS RECONCILIATION SKIPPED] Previous run still active'
+            '[SMS RECONCILIATION SKIPPED] Previous cleanup run still active'
         );
 
         return;
     }
 
-    reconciliationRunning = true;
+    cleanupReconciliationRunning = true;
 
     try {
         const sessions =
-            await getSessionsNeedingReconciliation();
+            await getSessionsNeedingReconciliation('cleanup');
 
         if (sessions.length === 0) {
             return;
@@ -288,12 +333,6 @@ Promise<void> {
             sessionCount: sessions.length
         });
 
-        /*
-         * Run sequentially for now.
-         *
-         * This intentionally avoids creating a burst of Zoom
-         * and Salesforce API requests.
-         */
         for (const session of sessions) {
             await reconcileSmsSession(session);
         }
@@ -307,36 +346,57 @@ Promise<void> {
             error
         );
     } finally {
-        reconciliationRunning = false;
+        cleanupReconciliationRunning = false;
     }
 }
 
 export function startSmsReconciliationWorker():
 void {
-    if (reconciliationTimer) {
+    if (
+        priorityReconciliationTimer ||
+        cleanupReconciliationTimer
+    ) {
         return;
     }
 
     console.log('[SMS RECONCILIATION WORKER STARTED]', {
-        intervalSeconds:
-            RECONCILIATION_INTERVAL_MS / 1000,
-        batchSize:
-            RECONCILIATION_BATCH_SIZE,
+        priorityIntervalSeconds:
+            PRIORITY_RECONCILIATION_INTERVAL_MS / 1000,
+        priorityBatchSize:
+            PRIORITY_RECONCILIATION_BATCH_SIZE,
+        cleanupIntervalSeconds:
+            CLEANUP_RECONCILIATION_INTERVAL_MS / 1000,
+        cleanupBatchSize:
+            CLEANUP_RECONCILIATION_BATCH_SIZE,
         lookbackHours:
             RECONCILIATION_LOOKBACK_HOURS
     });
 
     /*
-     * Give the application a few seconds to finish startup,
-     * then perform the first reconciliation without waiting
-     * a full minute.
+     * Priority reconciliation is the real-time recovery lane.
+     * It only touches sessions with an active reconcile_until
+     * window and is intentionally independent from cleanup work.
+     */
+    setTimeout(() => {
+        void runPrioritySmsReconciliation();
+    }, 5_000);
+
+    priorityReconciliationTimer =
+        setInterval(() => {
+            void runPrioritySmsReconciliation();
+        }, PRIORITY_RECONCILIATION_INTERVAL_MS);
+
+    /*
+     * Structural cleanup remains conservative and runs separately.
+     * Active priority sessions are explicitly excluded from this
+     * lane, so cleanup cannot consume the priority batch.
      */
     setTimeout(() => {
         void runSmsReconciliation();
     }, 10_000);
 
-    reconciliationTimer =
+    cleanupReconciliationTimer =
         setInterval(() => {
             void runSmsReconciliation();
-        }, RECONCILIATION_INTERVAL_MS);
+        }, CLEANUP_RECONCILIATION_INTERVAL_MS);
 }
