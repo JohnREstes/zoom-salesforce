@@ -271,7 +271,8 @@ async function handleZoomWebhook(
                             syncResult.syncTokenSaved
                     });
                     if (
-                        event.event === 'phone.sms_received'
+                        event.event === 'phone.sms_received' ||
+                        event.event === 'phone.sms_sent'
                     ) {
                         try {
                             const matchResult =
@@ -306,7 +307,10 @@ async function handleZoomWebhook(
                                         accountId:
                                             match.salesforce_account_id,
                                         smsSessionId,
-                                        eventType: 'SMS_RECEIVED'
+                                        eventType:
+                                            event.event === 'phone.sms_received'
+                                                ? 'SMS_RECEIVED'
+                                                : 'SMS_SENT'
                                     }
                                 );
                             } else {
