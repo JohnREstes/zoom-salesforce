@@ -295,6 +295,12 @@ export async function getZoomPhoneUsers(
                 typeof responseBody === 'object' &&
                 responseBody !== null
                     ? responseBody.code
+                    : undefined,
+            zoomMessage:
+                typeof responseBody === 'object' &&
+                responseBody !== null &&
+                typeof responseBody.message === 'string'
+                    ? responseBody.message
                     : undefined
         });
 
