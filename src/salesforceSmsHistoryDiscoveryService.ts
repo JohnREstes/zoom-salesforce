@@ -48,6 +48,7 @@ function getPhoneVariants(
 
 export async function discoverSalesforceSmsHistory(
     installationId: string,
+    salesforceUserId: string,
     contactId: string
 ): Promise<SalesforceSmsHistoryDiscoveryResult> {
     const contact =
@@ -103,24 +104,44 @@ export async function discoverSalesforceSmsHistory(
     const candidateResult =
         await db.query<CandidateSessionRow>(
             `
-            SELECT DISTINCT
-                s.id,
-                s.salesforce_contact_id
-            FROM zoom_sms_sessions s
-            INNER JOIN zoom_sms_participants p
-                ON p.sms_session_id = s.id
-            WHERE s.installation_id = $1
-              AND regexp_replace(
-                    COALESCE(p.phone_number, ''),
-                    '[^0-9]',
-                    '',
-                    'g'
-                  ) = ANY($2::text[])
-            ORDER BY s.id DESC
-            LIMIT 2
+                WITH authorized_user AS (
+                    SELECT zoom_user_id
+                    FROM communic8_users
+                    WHERE installation_id = $1
+                    AND salesforce_user_id = $2
+                    AND is_active = TRUE
+                    AND zoom_user_id IS NOT NULL
+                    LIMIT 1
+                )
+                SELECT DISTINCT
+                    s.id,
+                    s.salesforce_contact_id
+                FROM zoom_sms_sessions s
+                INNER JOIN authorized_user au
+                    ON TRUE
+                INNER JOIN zoom_sms_participants owner_participant
+                    ON owner_participant.sms_session_id = s.id
+                AND owner_participant.is_session_owner = TRUE
+                AND owner_participant.owner_id = au.zoom_user_id
+                INNER JOIN zoom_sms_participants external_participant
+                    ON external_participant.sms_session_id = s.id
+                AND external_participant.is_session_owner = FALSE
+                WHERE s.installation_id = $1
+                AND regexp_replace(
+                        COALESCE(
+                            external_participant.phone_number,
+                            ''
+                        ),
+                        '[^0-9]',
+                        '',
+                        'g'
+                    ) = ANY($3::text[])
+                ORDER BY s.id DESC
+                LIMIT 2
             `,
             [
                 installationId,
+                salesforceUserId,
                 phoneVariants
             ]
         );
@@ -179,28 +200,53 @@ export async function discoverSalesforceSmsHistory(
         };
     }
 
-    await db.query(
-        `
-        UPDATE zoom_sms_sessions
-        SET
-            salesforce_contact_id = $1,
-            salesforce_account_id = $2,
-            salesforce_matched_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $3
-          AND installation_id = $4
-          AND (
-                salesforce_contact_id IS NULL
-                OR salesforce_contact_id = $1
-              )
-        `,
-        [
-            contactId,
-            contact.accountId,
-            candidate.id,
-            installationId
-        ]
-    );
+    const updateResult =
+        await db.query(
+            `
+                UPDATE zoom_sms_sessions AS s
+                SET
+                    salesforce_contact_id = $1,
+                    salesforce_account_id = $2,
+                    salesforce_matched_at = NOW(),
+                    updated_at = NOW()
+                WHERE s.id = $3
+                AND s.installation_id = $4
+                AND (
+                        s.salesforce_contact_id IS NULL
+                        OR s.salesforce_contact_id = $1
+                    )
+                AND EXISTS (
+                        SELECT 1
+                        FROM zoom_sms_participants owner_participant
+                        INNER JOIN communic8_users cu
+                            ON cu.installation_id = $4
+                        AND cu.salesforce_user_id = $5
+                        AND cu.is_active = TRUE
+                        AND cu.zoom_user_id =
+                            owner_participant.owner_id
+                        WHERE owner_participant.sms_session_id = s.id
+                        AND owner_participant.is_session_owner = TRUE
+                        AND owner_participant.owner_type = 'user'
+                    )
+                RETURNING s.id
+            `,
+            [
+                contactId,
+                contact.accountId,
+                candidate.id,
+                installationId,
+                salesforceUserId
+            ]
+        );
+
+    if (updateResult.rowCount !== 1) {
+        return {
+            found: true,
+            smsSessionId: candidate.id,
+            matched: false,
+            synced: false
+        };
+    }
 
     /*
      * A candidate exists, so this is a targeted Zoom request,

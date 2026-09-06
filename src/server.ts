@@ -1495,6 +1495,7 @@ app.get(
                     const discovery =
                         await discoverSalesforceSmsHistory(
                             installationId,
+                            salesforceUserId,
                             contactId
                         );
 
