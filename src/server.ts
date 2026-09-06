@@ -57,6 +57,10 @@ import {
     startSmsReconciliationWorker
 } from './smsReconciliationService.js';
 
+import {
+    discoverSalesforceSmsHistory
+} from './salesforceSmsHistoryDiscoveryService.js';
+
 dotenv.config();
 
 const app = express();
@@ -1449,21 +1453,64 @@ app.get(
                 });
             }
 
-            const conversations =
+            const conversationOptions = {
+                sessionLimit:
+                    parsePositiveIntegerQuery(
+                        req.query.sessionLimit
+                    ),
+                messageLimitPerSession:
+                    parsePositiveIntegerQuery(
+                        req.query.messageLimit
+                    )
+            };
+
+            let conversations =
                 await getSmsConversationsForContact(
                     installationId,
                     contactId,
-                    {
-                        sessionLimit:
-                            parsePositiveIntegerQuery(
-                                req.query.sessionLimit
-                            ),
-                        messageLimitPerSession:
-                            parsePositiveIntegerQuery(
-                                req.query.messageLimit
-                            )
-                    }
+                    conversationOptions
                 );
+
+            /*
+            * If Communik8 does not already have a conversation
+            * associated with this Salesforce Contact, perform a
+            * lightweight local discovery.
+            *
+            * Discovery only calls Zoom when exactly one local SMS
+            * session can be identified from the Contact's phone
+            * numbers.
+            */
+            if (conversations.length === 0) {
+                try {
+                    const discovery =
+                        await discoverSalesforceSmsHistory(
+                            installationId,
+                            contactId
+                        );
+
+                    if (discovery.matched) {
+                        conversations =
+                            await getSmsConversationsForContact(
+                                installationId,
+                                contactId,
+                                conversationOptions
+                            );
+                    }
+                } catch (discoveryError) {
+                    /*
+                    * Historical discovery is best-effort.
+                    * A temporary Zoom or Salesforce problem should
+                    * not prevent the Contact page from loading.
+                    */
+                    console.warn(
+                        '[SALESFORCE SMS HISTORY DISCOVERY FAILED]',
+                        {
+                            installationId,
+                            contactId
+                        }
+                    );
+                }
+            }
 
             res.setHeader(
                 'Cache-Control',
