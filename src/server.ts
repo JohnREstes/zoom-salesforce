@@ -1453,6 +1453,15 @@ app.get(
                 });
             }
 
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
             const conversationOptions = {
                 sessionLimit:
                     parsePositiveIntegerQuery(
@@ -1467,6 +1476,7 @@ app.get(
             let conversations =
                 await getSmsConversationsForContact(
                     installationId,
+                    salesforceUserId,
                     contactId,
                     conversationOptions
                 );
@@ -1490,11 +1500,12 @@ app.get(
 
                     if (discovery.matched) {
                         conversations =
-                            await getSmsConversationsForContact(
-                                installationId,
-                                contactId,
-                                conversationOptions
-                            );
+                        await getSmsConversationsForContact(
+                            installationId,
+                            salesforceUserId,
+                            contactId,
+                            conversationOptions
+                        );
                     }
                 } catch (discoveryError) {
                     /*
@@ -1690,10 +1701,20 @@ app.get(
                 });
             }
 
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
             const conversations =
-                await getSmsConversationsForAccount(
-                    installationId,
-                    accountId,
+            await getSmsConversationsForAccount(
+                installationId,
+                salesforceUserId,
+                accountId,
                     {
                         sessionLimit:
                             parsePositiveIntegerQuery(

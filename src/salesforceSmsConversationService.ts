@@ -89,6 +89,7 @@ function parseJsonValue(value: unknown): unknown {
 
 async function getSmsConversations(
     installationId: string,
+    salesforceUserId: string,
     salesforceField:
         'salesforce_contact_id' |
         'salesforce_account_id',
@@ -116,20 +117,39 @@ async function getSmsConversations(
      */
     const result = await db.query<ConversationRow>(
         `
-        WITH selected_sessions AS (
-            SELECT
-                id,
-                zoom_session_id,
-                last_access_time,
-                salesforce_contact_id,
-                salesforce_account_id
-            FROM zoom_sms_sessions
+        WITH authorized_user AS (
+            SELECT zoom_user_id
+            FROM communic8_users
             WHERE installation_id = $1
-              AND ${salesforceField} = $2
+            AND salesforce_user_id = $2
+            AND is_active = TRUE
+            AND zoom_user_id IS NOT NULL
+            LIMIT 1
+        ),
+        selected_sessions AS (
+            SELECT
+                s.id,
+                s.zoom_session_id,
+                s.last_access_time,
+                s.salesforce_contact_id,
+                s.salesforce_account_id
+            FROM zoom_sms_sessions s
+            INNER JOIN authorized_user au
+                ON TRUE
+            WHERE s.installation_id = $1
+            AND s.${salesforceField} = $3
+            AND EXISTS (
+                SELECT 1
+                FROM zoom_sms_participants p
+                WHERE p.sms_session_id = s.id
+                    AND p.is_session_owner = TRUE
+                    AND p.owner_type = 'user'
+                    AND p.owner_id = au.zoom_user_id
+            )
             ORDER BY
-                last_access_time DESC NULLS LAST,
-                id DESC
-            LIMIT $3
+                s.last_access_time DESC NULLS LAST,
+                s.id DESC
+            LIMIT $4
         )
         SELECT
             s.id AS sms_session_id,
@@ -159,7 +179,7 @@ async function getSmsConversations(
             ORDER BY
                 message_date_time DESC NULLS LAST,
                 id DESC
-            LIMIT $4
+            LIMIT $5
         ) m ON TRUE
         ORDER BY
             s.last_access_time DESC NULLS LAST,
@@ -169,6 +189,7 @@ async function getSmsConversations(
         `,
         [
             installationId,
+            salesforceUserId,
             salesforceRecordId,
             sessionLimit,
             messageLimitPerSession
@@ -229,11 +250,13 @@ async function getSmsConversations(
 
 export async function getSmsConversationsForContact(
     installationId: string,
+    salesforceUserId: string,
     salesforceContactId: string,
     options: ConversationLookupOptions = {}
 ): Promise<SalesforceSmsConversation[]> {
     return getSmsConversations(
         installationId,
+        salesforceUserId,
         'salesforce_contact_id',
         salesforceContactId,
         options
@@ -242,11 +265,13 @@ export async function getSmsConversationsForContact(
 
 export async function getSmsConversationsForAccount(
     installationId: string,
+    salesforceUserId: string,
     salesforceAccountId: string,
     options: ConversationLookupOptions = {}
 ): Promise<SalesforceSmsConversation[]> {
     return getSmsConversations(
         installationId,
+        salesforceUserId,
         'salesforce_account_id',
         salesforceAccountId,
         options
