@@ -1,5 +1,8 @@
 import { db } from './db.js';
 import { sendSmsMessage } from './zoomPhoneService.js';
+import {
+    getSalesforceContactById
+} from './salesforceContactService.js';
 
 type SmsSessionRow = {
     id: number;
@@ -13,14 +16,24 @@ type SmsParticipantRow = {
     phone_number: string | null;
 };
 
+type Communik8UserRow = {
+    zoom_user_id: string | null;
+    zoom_phone_number: string | null;
+    zoom_phone_number_count: number;
+    is_sms_capable: boolean;
+    is_active: boolean;
+};
+
 export async function sendSmsForSalesforceContact(
     installationId: string,
+    salesforceUserId: string,
     contactId: string,
     message: string
 ): Promise<{
-    smsSessionId: number;
-    zoomSessionId: string;
+    smsSessionId: number | null;
+    zoomSessionId: string | null;
     zoomMessageId: string | null;
+    firstContact: boolean;
 }> {
     const cleanMessage = message.trim();
 
@@ -29,8 +42,9 @@ export async function sendSmsForSalesforceContact(
     }
 
     /*
-     * For v1, reply through the Contact's most recently
-     * active matched SMS conversation.
+     * First preference: preserve the existing proven behavior.
+     * If this Contact already has a matched conversation,
+     * reply through that conversation's Zoom participants.
      */
     const sessionResult = await db.query<SmsSessionRow>(
         `
@@ -51,103 +65,228 @@ export async function sendSmsForSalesforceContact(
         ]
     );
 
-    if (sessionResult.rowCount !== 1) {
+    if (sessionResult.rowCount === 1) {
+        const session = sessionResult.rows[0];
+
+        const participantResult =
+            await db.query<SmsParticipantRow>(
+                `
+                SELECT
+                    owner_type,
+                    owner_id,
+                    is_session_owner,
+                    phone_number
+                FROM zoom_sms_participants
+                WHERE sms_session_id = $1
+                `,
+                [session.id]
+            );
+
+        const participants = participantResult.rows;
+
+        const owners = participants.filter(
+            participant =>
+                participant.is_session_owner === true &&
+                Boolean(participant.phone_number)
+        );
+
+        const externalParticipants = participants.filter(
+            participant =>
+                participant.is_session_owner !== true &&
+                Boolean(participant.phone_number)
+        );
+
+        if (owners.length !== 1) {
+            throw new Error(
+                'SMS conversation does not have exactly one sender'
+            );
+        }
+
+        if (externalParticipants.length !== 1) {
+            throw new Error(
+                'SMS conversation is not a one-to-one conversation'
+            );
+        }
+
+        const owner = owners[0];
+        const externalParticipant =
+            externalParticipants[0];
+
+        const fromPhoneNumber =
+            owner.phone_number;
+
+        const toPhoneNumber =
+            externalParticipant.phone_number;
+
+        if (!fromPhoneNumber || !toPhoneNumber) {
+            throw new Error(
+                'SMS conversation is missing participant phone information'
+            );
+        }
+
+        const zoomResponse =
+            await sendSmsMessage(
+                installationId,
+                {
+                    fromPhoneNumber,
+                    toPhoneNumber,
+                    message: cleanMessage,
+                    senderUserId:
+                        owner.owner_id ?? undefined
+                }
+            );
+
+        console.log(
+            '[SALESFORCE SMS SEND SUCCESS]',
+            {
+                installationId,
+                contactId,
+                smsSessionId: session.id,
+                firstContact: false,
+                hasZoomMessageId:
+                    Boolean(zoomResponse?.message_id)
+            }
+        );
+
+        return {
+            smsSessionId: session.id,
+            zoomSessionId:
+                session.zoom_session_id,
+            zoomMessageId:
+                typeof zoomResponse?.message_id === 'string'
+                    ? zoomResponse.message_id
+                    : null,
+            firstContact: false
+        };
+    }
+
+    /*
+     * No existing conversation.
+     *
+     * Resolve the Contact directly from Salesforce.
+     */
+    const contact =
+        await getSalesforceContactById(
+            installationId,
+            contactId
+        );
+
+    if (!contact) {
         throw new Error(
-            'No matched SMS conversation found for Contact'
+            'Salesforce Contact not found'
         );
     }
 
-    const session = sessionResult.rows[0];
+    /*
+     * For first-contact SMS, prefer MobilePhone and then
+     * the standard Phone field.
+     *
+     * OtherPhone and HomePhone are deliberately excluded
+     * from automatic outbound SMS for now.
+     */
+    const toPhoneNumber =
+        contact.mobilePhone?.trim() ||
+        contact.phone?.trim() ||
+        null;
+
+    if (!toPhoneNumber) {
+        throw new Error(
+            'Salesforce Contact does not have an SMS phone number'
+        );
+    }
 
     /*
-     * Get Zoom's participant snapshot for this session.
-     * Salesforce is never allowed to specify these numbers.
+     * Resolve the current Salesforce user to their own
+     * deterministic Zoom Phone sender identity.
      */
-    const participantResult =
-        await db.query<SmsParticipantRow>(
+    const userResult =
+        await db.query<Communik8UserRow>(
             `
             SELECT
-                owner_type,
-                owner_id,
-                is_session_owner,
-                phone_number
-            FROM zoom_sms_participants
-            WHERE sms_session_id = $1
+                zoom_user_id,
+                zoom_phone_number,
+                zoom_phone_number_count,
+                is_sms_capable,
+                is_active
+            FROM communic8_users
+            WHERE installation_id = $1
+              AND salesforce_user_id = $2
+            LIMIT 1
             `,
-            [session.id]
+            [
+                installationId,
+                salesforceUserId
+            ]
         );
 
-    const participants = participantResult.rows;
+    if (userResult.rowCount !== 1) {
+        throw new Error(
+            'Salesforce user is not mapped to a Zoom Phone user'
+        );
+    }
 
-    const owners = participants.filter(
-        participant =>
-            participant.is_session_owner === true &&
-            Boolean(participant.phone_number)
-    );
+    const sender = userResult.rows[0];
 
-    const externalParticipants = participants.filter(
-        participant =>
-            participant.is_session_owner !== true &&
-            Boolean(participant.phone_number)
-    );
+    if (
+        !sender.is_active ||
+        !sender.is_sms_capable ||
+        sender.zoom_phone_number_count !== 1 ||
+        !sender.zoom_user_id ||
+        !sender.zoom_phone_number
+    ) {
+        throw new Error(
+            'Salesforce user does not have a deterministic SMS sender'
+        );
+    }
 
     /*
-     * Don't guess which number to use.
-     * This first Salesforce implementation supports a
-     * standard one-to-one SMS conversation.
+     * Zoom's send-message endpoint can initiate a new SMS
+     * conversation; an existing session ID is not required.
      */
-    if (owners.length !== 1) {
-        throw new Error(
-            'SMS conversation does not have exactly one sender'
+    const zoomResponse =
+        await sendSmsMessage(
+            installationId,
+            {
+                fromPhoneNumber:
+                    sender.zoom_phone_number,
+                toPhoneNumber,
+                message: cleanMessage,
+                senderUserId:
+                    sender.zoom_user_id
+            }
         );
-    }
 
-    if (externalParticipants.length !== 1) {
-        throw new Error(
-            'SMS conversation is not a one-to-one conversation'
-        );
-    }
+    const zoomSessionId =
+        typeof zoomResponse?.session_id === 'string'
+            ? zoomResponse.session_id
+            : null;
 
-    const owner = owners[0];
-    const externalParticipant =
-        externalParticipants[0];
-
-    const fromPhoneNumber = owner.phone_number;
-    const toPhoneNumber =
-        externalParticipant.phone_number;
-
-    if (!fromPhoneNumber || !toPhoneNumber) {
-        throw new Error(
-            'SMS conversation is missing participant phone information'
-        );
-    }
-
-    const zoomResponse = await sendSmsMessage(
-        installationId,
+    console.log(
+        '[SALESFORCE SMS FIRST CONTACT SEND SUCCESS]',
         {
-            fromPhoneNumber,
-            toPhoneNumber,
-            message: cleanMessage,
-            senderUserId:
-                owner.owner_id ?? undefined
+            installationId,
+            contactId,
+            hasZoomSessionId:
+                Boolean(zoomSessionId),
+            hasZoomMessageId:
+                Boolean(zoomResponse?.message_id)
         }
     );
 
-    console.log('[SALESFORCE SMS SEND SUCCESS]', {
-        installationId,
-        contactId,
-        smsSessionId: session.id,
-        hasZoomMessageId: Boolean(
-            zoomResponse?.message_id
-        )
-    });
-
+    /*
+     * Do not invent a local session ID here.
+     *
+     * The Zoom webhook/reconciliation path can establish
+     * the authoritative local session. Immediate local
+     * persistence will be the next reliability change.
+     */
     return {
-        smsSessionId: session.id,
-        zoomSessionId: session.zoom_session_id,
+        smsSessionId: null,
+        zoomSessionId,
         zoomMessageId:
             typeof zoomResponse?.message_id === 'string'
                 ? zoomResponse.message_id
-                : null
+                : null,
+        firstContact: true
     };
 }
