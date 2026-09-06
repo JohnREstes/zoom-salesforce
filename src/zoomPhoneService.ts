@@ -215,6 +215,12 @@ export async function sendSmsMessage(
                 typeof responseBody === 'object' &&
                 responseBody !== null
                     ? responseBody.code
+                    : undefined,
+            zoomMessage:
+                typeof responseBody === 'object' &&
+                responseBody !== null &&
+                typeof responseBody.message === 'string'
+                    ? responseBody.message
                     : undefined
         });
 
