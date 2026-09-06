@@ -1527,9 +1527,19 @@ app.post(
                 });
             }
 
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
             const result =
                 await sendSmsForSalesforceContact(
                     installationId,
+                    salesforceUserId,
                     contactId,
                     message
                 );
@@ -1539,20 +1549,22 @@ app.post(
              * Communik8's local conversation history remains
              * authoritative immediately after sending.
              */
-            try {
-                await syncSmsMessagesForSession(
-                    installationId,
-                    result.smsSessionId
-                );
-            } catch (syncError) {
-                console.warn(
-                    '[SALESFORCE SMS POST-SEND SYNC FAILED]',
-                    {
+            if (result.smsSessionId !== null) {
+                try {
+                    await syncSmsMessagesForSession(
                         installationId,
-                        smsSessionId:
-                            result.smsSessionId
-                    }
-                );
+                        result.smsSessionId
+                    );
+                } catch (syncError) {
+                    console.warn(
+                        '[SALESFORCE SMS POST-SEND SYNC FAILED]',
+                        {
+                            installationId,
+                            smsSessionId:
+                                result.smsSessionId
+                        }
+                    );
+                }
             }
 
             res.setHeader(
