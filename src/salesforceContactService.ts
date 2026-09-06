@@ -184,3 +184,60 @@ export async function findSalesforceContactsByPhone(
                 record.HomePhone ?? null
         }));
 }
+
+export async function getSalesforceContactById(
+    installationId: string,
+    contactId: string
+): Promise<SalesforceContactMatch | null> {
+    const soql =
+        `SELECT ` +
+        `Id, Name, AccountId, Phone, MobilePhone, OtherPhone, HomePhone ` +
+        `FROM Contact ` +
+        `WHERE Id = '${contactId}' ` +
+        `LIMIT 1`;
+
+    const path =
+        `/services/data/v65.0/query?q=${encodeURIComponent(soql)}`;
+
+    const response =
+        await fetchSalesforce(
+            installationId,
+            path
+        );
+
+    if (!response.ok) {
+        console.error(
+            '[SALESFORCE CONTACT LOOKUP FAILED]',
+            {
+                installationId,
+                status: response.status
+            }
+        );
+
+        throw new Error(
+            `Salesforce Contact lookup failed with status ${response.status}`
+        );
+    }
+
+    const data =
+        await response.json() as SalesforceContactQueryResponse;
+
+    const record =
+        Array.isArray(data.records)
+            ? data.records[0]
+            : undefined;
+
+    if (!record) {
+        return null;
+    }
+
+    return {
+        id: record.Id,
+        name: record.Name ?? null,
+        accountId: record.AccountId ?? null,
+        phone: record.Phone ?? null,
+        mobilePhone: record.MobilePhone ?? null,
+        otherPhone: record.OtherPhone ?? null,
+        homePhone: record.HomePhone ?? null
+    };
+}
