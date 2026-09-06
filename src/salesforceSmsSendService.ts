@@ -24,6 +24,36 @@ type Communik8UserRow = {
     is_active: boolean;
 };
 
+function normalizeSmsPhoneNumber(
+    phoneNumber: string
+): string {
+    const trimmed = phoneNumber.trim();
+
+    // Already looks like E.164.
+    if (/^\+[1-9]\d{7,14}$/.test(trimmed)) {
+        return trimmed;
+    }
+
+    const digits = trimmed.replace(/\D/g, '');
+
+    // North American 10-digit number.
+    if (digits.length === 10) {
+        return `+1${digits}`;
+    }
+
+    // North American number already containing country code.
+    if (
+        digits.length === 11 &&
+        digits.startsWith('1')
+    ) {
+        return `+${digits}`;
+    }
+
+    throw new Error(
+        'SMS phone number cannot be converted to E.164 format'
+    );
+}
+
 export async function sendSmsForSalesforceContact(
     installationId: string,
     salesforceUserId: string,
@@ -177,23 +207,19 @@ export async function sendSmsForSalesforceContact(
         );
     }
 
-    /*
-     * For first-contact SMS, prefer MobilePhone and then
-     * the standard Phone field.
-     *
-     * OtherPhone and HomePhone are deliberately excluded
-     * from automatic outbound SMS for now.
-     */
-    const toPhoneNumber =
+    const rawToPhoneNumber =
         contact.mobilePhone?.trim() ||
         contact.phone?.trim() ||
         null;
 
-    if (!toPhoneNumber) {
+    if (!rawToPhoneNumber) {
         throw new Error(
             'Salesforce Contact does not have an SMS phone number'
         );
     }
+
+    const toPhoneNumber =
+        normalizeSmsPhoneNumber(rawToPhoneNumber);
 
     /*
      * Resolve the current Salesforce user to their own
