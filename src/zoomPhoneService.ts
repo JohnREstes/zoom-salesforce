@@ -64,6 +64,90 @@ export async function getSmsSessions(
     return responseBody;
 }
 
+export async function getUserSmsSessions(
+    installationId: string,
+    zoomUserId: string,
+    options: GetSmsSessionsOptions = {}
+): Promise<any> {
+    if (!zoomUserId) {
+        throw new Error(
+            'Zoom user ID is required for SMS session retrieval'
+        );
+    }
+
+    const accessToken =
+        await getValidZoomAccessToken(installationId);
+
+    const url = new URL(
+        `${ZOOM_API_BASE_URL}/phone/users/${encodeURIComponent(
+            zoomUserId
+        )}/sms/sessions`
+    );
+
+    if (options.pageSize) {
+        url.searchParams.set(
+            'page_size',
+            String(options.pageSize)
+        );
+    }
+
+    if (options.nextPageToken) {
+        url.searchParams.set(
+            'next_page_token',
+            options.nextPageToken
+        );
+    }
+
+    const response = await fetch(
+        url.toString(),
+        {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json'
+            }
+        }
+    );
+
+    const responseBody =
+        await response.json().catch(() => null);
+
+    if (!response.ok) {
+        console.error(
+            '[ZOOM USER SMS SESSIONS FAILED]',
+            {
+                installationId,
+                status: response.status,
+                zoomCode:
+                    typeof responseBody === 'object' &&
+                    responseBody !== null
+                        ? responseBody.code
+                        : undefined
+            }
+        );
+
+        const error = new Error(
+            `Zoom user SMS sessions request failed with status ${response.status}`
+        ) as Error & {
+            zoomCode?: number;
+            zoomStatus?: number;
+        };
+
+        error.zoomCode =
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            typeof responseBody.code === 'number'
+                ? responseBody.code
+                : undefined;
+
+        error.zoomStatus = response.status;
+
+        throw error;
+    }
+
+    return responseBody;
+}
+
 export async function syncSmsSession(
     installationId: string,
     zoomSessionId: string,
