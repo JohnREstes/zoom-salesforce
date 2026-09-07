@@ -843,6 +843,195 @@ function asSmsPartyArray(
         );
 }
 
+export async function backfillSmsSessionOwnersFromMessages(
+    installationId: string
+): Promise<{
+    candidates: number;
+    repaired: number;
+    ambiguous: number;
+    unmapped: number;
+}> {
+    const result = await db.query<{
+        sms_session_id: string;
+        zoom_owner_id: string | null;
+        owner_count: string;
+        mapped_owner_count: string;
+    }>(
+        `
+            WITH candidate_owners AS (
+
+                /*
+                 * Outbound:
+                 * sender.owner is the internal Zoom user.
+                 */
+                SELECT DISTINCT
+                    s.id AS sms_session_id,
+                    m.sender -> 'owner' ->> 'id'
+                        AS zoom_owner_id
+                FROM zoom_sms_sessions s
+                INNER JOIN zoom_sms_messages m
+                    ON m.sms_session_id = s.id
+                WHERE s.installation_id = $1
+                  AND LOWER(m.direction) = 'out'
+                  AND jsonb_typeof(
+                        m.sender -> 'owner'
+                      ) = 'object'
+                  AND m.sender -> 'owner' ->> 'id'
+                        IS NOT NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM zoom_sms_participants p
+                        WHERE p.sms_session_id = s.id
+                          AND p.is_session_owner = TRUE
+                    )
+
+                UNION
+
+                /*
+                 * Inbound:
+                 * to_member.owner is the internal Zoom user.
+                 */
+                SELECT DISTINCT
+                    s.id AS sms_session_id,
+                    tm.member -> 'owner' ->> 'id'
+                        AS zoom_owner_id
+                FROM zoom_sms_sessions s
+                INNER JOIN zoom_sms_messages m
+                    ON m.sms_session_id = s.id
+                CROSS JOIN LATERAL
+                    jsonb_array_elements(m.to_members)
+                    AS tm(member)
+                WHERE s.installation_id = $1
+                  AND LOWER(m.direction) = 'in'
+                  AND jsonb_typeof(m.to_members) = 'array'
+                  AND jsonb_typeof(
+                        tm.member -> 'owner'
+                      ) = 'object'
+                  AND tm.member -> 'owner' ->> 'id'
+                        IS NOT NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM zoom_sms_participants p
+                        WHERE p.sms_session_id = s.id
+                          AND p.is_session_owner = TRUE
+                    )
+            ),
+            per_session AS (
+                SELECT
+                    sms_session_id,
+                    COUNT(DISTINCT zoom_owner_id)
+                        AS owner_count,
+                    MIN(zoom_owner_id)
+                        AS zoom_owner_id
+                FROM candidate_owners
+                GROUP BY sms_session_id
+            ),
+            classified AS (
+                SELECT
+                    ps.sms_session_id,
+                    ps.zoom_owner_id,
+                    ps.owner_count,
+                    CASE
+                        WHEN ps.owner_count = 1
+                         AND EXISTS (
+                                SELECT 1
+                                FROM communic8_users cu
+                                WHERE cu.installation_id = $1
+                                  AND cu.zoom_user_id =
+                                      ps.zoom_owner_id
+                            )
+                        THEN 1
+                        ELSE 0
+                    END AS mapped_owner_count
+                FROM per_session ps
+            )
+            SELECT
+                sms_session_id::text,
+                zoom_owner_id,
+                owner_count::text,
+                mapped_owner_count::text
+            FROM classified
+        `,
+        [installationId]
+    );
+
+    let repaired = 0;
+    let ambiguous = 0;
+    let unmapped = 0;
+
+    for (const row of result.rows) {
+        const ownerCount = Number(row.owner_count);
+        const mappedOwnerCount =
+            Number(row.mapped_owner_count);
+
+        if (ownerCount !== 1) {
+            ambiguous += 1;
+            continue;
+        }
+
+        if (
+            mappedOwnerCount !== 1 ||
+            !row.zoom_owner_id
+        ) {
+            unmapped += 1;
+            continue;
+        }
+
+        const updateResult = await db.query(
+            `
+                INSERT INTO zoom_sms_participants (
+                    sms_session_id,
+                    owner_type,
+                    owner_id,
+                    is_session_owner,
+                    phone_number,
+                    display_name
+                )
+                SELECT
+                    $1,
+                    'user',
+                    $2,
+                    TRUE,
+                    NULL,
+                    NULL
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM zoom_sms_participants p
+                    WHERE p.sms_session_id = $1
+                      AND p.is_session_owner = TRUE
+                )
+                RETURNING id
+            `,
+            [
+                Number(row.sms_session_id),
+                row.zoom_owner_id
+            ]
+        );
+
+        if (updateResult.rowCount === 1) {
+            repaired += 1;
+        }
+    }
+
+    console.log(
+        '[ZOOM SMS HISTORICAL OWNER BACKFILL]',
+        {
+            installationId,
+            candidates: result.rows.length,
+            repaired,
+            ambiguous,
+            unmapped
+        }
+    );
+
+    return {
+        candidates: result.rows.length,
+        repaired,
+        ambiguous,
+        unmapped
+    };
+}
+
 export async function cleanupEmptyWebhookSmsSession(
     installationId: string,
     smsSessionId: number
