@@ -1,5 +1,9 @@
 import { db } from './db.js';
-import { getSmsSessions } from './zoomPhoneService.js';
+import {
+    getSmsSessions,
+    getUserSmsSessions
+} from './zoomPhoneService.js';
+
 
 type ZoomSmsParticipant = {
     owner?: {
@@ -401,6 +405,212 @@ export async function syncSmsSessionSnapshot(
         found: false,
         pagesProcessed,
         participantsProcessed: 0
+    };
+}
+
+export async function syncSmsSessionsForUser(
+    installationId: string,
+    zoomUserId: string
+): Promise<{
+    pagesProcessed: number;
+    sessionsProcessed: number;
+    participantsProcessed: number;
+}> {
+    if (!zoomUserId) {
+        throw new Error(
+            'Zoom user ID is required for user SMS session sync'
+        );
+    }
+
+    let nextPageToken: string | undefined;
+    let pagesProcessed = 0;
+    let sessionsProcessed = 0;
+    let participantsProcessed = 0;
+
+    do {
+        const response =
+            await getUserSmsSessions(
+                installationId,
+                zoomUserId,
+                {
+                    pageSize: 100,
+                    nextPageToken
+                }
+            ) as ZoomSmsSessionsResponse;
+
+        pagesProcessed += 1;
+
+        const sessions =
+            Array.isArray(response.sms_sessions)
+                ? response.sms_sessions
+                : [];
+
+        for (const session of sessions) {
+            if (!session.session_id) {
+                continue;
+            }
+
+            /*
+             * Defense in depth:
+             * A user-scoped Zoom response should contain sessions
+             * belonging to the requested Zoom user. Verify that
+             * relationship before persisting anything.
+             */
+            const ownerParticipants =
+                Array.isArray(session.participants)
+                    ? session.participants.filter(
+                        participant =>
+                            participant.is_session_owner === true &&
+                            participant.owner?.type === 'user' &&
+                            participant.owner?.id === zoomUserId
+                    )
+                    : [];
+
+            if (ownerParticipants.length !== 1) {
+                console.warn(
+                    '[ZOOM USER SMS SESSION OWNER MISMATCH]',
+                    {
+                        installationId,
+                        hasZoomUserId: true,
+                        hasSessionId: true,
+                        matchingOwnerCount:
+                            ownerParticipants.length
+                    }
+                );
+
+                continue;
+            }
+
+            const client = await db.connect();
+
+            try {
+                await client.query('BEGIN');
+
+                const sessionResult =
+                    await client.query(
+                        `
+                            INSERT INTO zoom_sms_sessions (
+                                installation_id,
+                                zoom_session_id,
+                                session_type,
+                                last_access_time
+                            )
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (
+                                installation_id,
+                                zoom_session_id
+                            )
+                            DO UPDATE SET
+                                session_type =
+                                    EXCLUDED.session_type,
+                                last_access_time =
+                                    EXCLUDED.last_access_time,
+                                updated_at = NOW()
+                            RETURNING id
+                        `,
+                        [
+                            installationId,
+                            session.session_id,
+                            session.session_type ?? null,
+                            session.last_access_time
+                                ? new Date(
+                                    session.last_access_time
+                                )
+                                : null
+                        ]
+                    );
+
+                const smsSessionId =
+                    sessionResult.rows[0].id;
+
+                /*
+                 * This response came from the user-scoped Zoom
+                 * endpoint and passed the owner check above, so
+                 * Zoom is authoritative for this snapshot.
+                 */
+                await client.query(
+                    `
+                        DELETE FROM zoom_sms_participants
+                        WHERE sms_session_id = $1
+                    `,
+                    [smsSessionId]
+                );
+
+                const participants =
+                    Array.isArray(session.participants)
+                        ? session.participants
+                        : [];
+
+                for (const participant of participants) {
+                    await client.query(
+                        `
+                            INSERT INTO zoom_sms_participants (
+                                sms_session_id,
+                                owner_type,
+                                owner_id,
+                                is_session_owner,
+                                phone_number,
+                                display_name
+                            )
+                            VALUES (
+                                $1,
+                                $2,
+                                $3,
+                                $4,
+                                $5,
+                                $6
+                            )
+                        `,
+                        [
+                            smsSessionId,
+                            participant.owner?.type ?? null,
+                            participant.owner?.id ?? null,
+                            participant.is_session_owner ??
+                                false,
+                            participant.phone_number ?? null,
+                            participant.display_name ?? null
+                        ]
+                    );
+
+                    participantsProcessed += 1;
+                }
+
+                await client.query('COMMIT');
+
+                sessionsProcessed += 1;
+            } catch (error) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch {
+                    // Preserve original error.
+                }
+
+                throw error;
+            } finally {
+                client.release();
+            }
+        }
+
+        nextPageToken =
+            response.next_page_token || undefined;
+
+    } while (nextPageToken);
+
+    console.log(
+        '[ZOOM USER SMS SESSION SYNC SUCCESS]',
+        {
+            installationId,
+            hasZoomUserId: true,
+            pagesProcessed,
+            sessionsProcessed,
+            participantsProcessed
+        }
+    );
+
+    return {
+        pagesProcessed,
+        sessionsProcessed,
+        participantsProcessed
     };
 }
 
