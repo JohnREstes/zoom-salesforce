@@ -1213,18 +1213,18 @@ export async function backfillSmsSessionParticipantDetailsFromMessages(
                         display_name
                     )
                     SELECT
-                        $1,
+                        $1::bigint,
                         NULL,
                         NULL,
                         FALSE,
-                        $2,
+                        $2::varchar,
                         NULL
                     WHERE NOT EXISTS (
                         SELECT 1
                         FROM zoom_sms_participants p
-                        WHERE p.sms_session_id = $1
-                          AND p.is_session_owner = FALSE
-                          AND p.phone_number = $2
+                        WHERE p.sms_session_id = $1::bigint
+                        AND p.is_session_owner = FALSE
+                        AND p.phone_number = $2::varchar
                     )
                 `,
                 [
