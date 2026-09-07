@@ -58,10 +58,11 @@ export async function provisionCommunik8Installation(
                 SELECT zoom_user_id
                 FROM communic8_users
                 WHERE installation_id = $1
-                  AND salesforce_user_id IS NOT NULL
-                  AND zoom_user_id IS NOT NULL
-                  AND is_active = TRUE
-                  AND is_sms_capable = TRUE
+                AND salesforce_user_id IS NOT NULL
+                AND zoom_user_id IS NOT NULL
+                AND is_active = TRUE
+                AND is_sms_capable = TRUE
+                AND is_communik8_enabled = TRUE
                 ORDER BY id
             `,
             [installationId]
