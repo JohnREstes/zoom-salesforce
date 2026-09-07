@@ -1032,6 +1032,240 @@ export async function backfillSmsSessionOwnersFromMessages(
     };
 }
 
+export async function backfillSmsSessionParticipantDetailsFromMessages(
+    installationId: string
+): Promise<{
+    candidates: number;
+    repaired: number;
+    ambiguous: number;
+}> {
+    const result = await db.query<{
+        sms_session_id: string;
+        owner_id: string;
+        owner_phone: string | null;
+        external_phone: string | null;
+        owner_phone_count: string;
+        external_phone_count: string;
+    }>(
+        `
+            WITH authoritative_sessions AS (
+                SELECT
+                    s.id AS sms_session_id,
+                    p.owner_id
+                FROM zoom_sms_sessions s
+                INNER JOIN zoom_sms_participants p
+                    ON p.sms_session_id = s.id
+                   AND p.is_session_owner = TRUE
+                   AND p.owner_type = 'user'
+                   AND p.owner_id IS NOT NULL
+                INNER JOIN communic8_users cu
+                    ON cu.installation_id = s.installation_id
+                   AND cu.zoom_user_id = p.owner_id
+                WHERE s.installation_id = $1
+            ),
+
+            candidate_pairs AS (
+
+                /*
+                 * Outbound:
+                 * sender = internal owner
+                 * to_member = external party
+                 */
+                SELECT
+                    a.sms_session_id,
+                    a.owner_id,
+                    m.sender ->> 'phone_number'
+                        AS owner_phone,
+                    tm.member ->> 'phone_number'
+                        AS external_phone
+                FROM authoritative_sessions a
+                INNER JOIN zoom_sms_messages m
+                    ON m.sms_session_id = a.sms_session_id
+                CROSS JOIN LATERAL
+                    jsonb_array_elements(m.to_members)
+                    AS tm(member)
+                WHERE LOWER(m.direction) = 'out'
+                  AND jsonb_typeof(m.to_members) = 'array'
+                  AND m.sender -> 'owner' ->> 'id'
+                        = a.owner_id
+                  AND m.sender ->> 'phone_number'
+                        IS NOT NULL
+                  AND tm.member ->> 'phone_number'
+                        IS NOT NULL
+
+                UNION ALL
+
+                /*
+                 * Inbound:
+                 * sender = external party
+                 * to_member = internal owner
+                 */
+                SELECT
+                    a.sms_session_id,
+                    a.owner_id,
+                    tm.member ->> 'phone_number'
+                        AS owner_phone,
+                    m.sender ->> 'phone_number'
+                        AS external_phone
+                FROM authoritative_sessions a
+                INNER JOIN zoom_sms_messages m
+                    ON m.sms_session_id = a.sms_session_id
+                CROSS JOIN LATERAL
+                    jsonb_array_elements(m.to_members)
+                    AS tm(member)
+                WHERE LOWER(m.direction) = 'in'
+                  AND jsonb_typeof(m.to_members) = 'array'
+                  AND tm.member -> 'owner' ->> 'id'
+                        = a.owner_id
+                  AND tm.member ->> 'phone_number'
+                        IS NOT NULL
+                  AND m.sender ->> 'phone_number'
+                        IS NOT NULL
+            ),
+
+            per_session AS (
+                SELECT
+                    sms_session_id,
+                    MIN(owner_id) AS owner_id,
+
+                    COUNT(DISTINCT owner_phone)
+                        AS owner_phone_count,
+
+                    MIN(owner_phone)
+                        AS owner_phone,
+
+                    COUNT(DISTINCT external_phone)
+                        AS external_phone_count,
+
+                    MIN(external_phone)
+                        AS external_phone
+
+                FROM candidate_pairs
+                GROUP BY sms_session_id
+            )
+
+            SELECT
+                sms_session_id::text,
+                owner_id,
+                owner_phone,
+                external_phone,
+                owner_phone_count::text,
+                external_phone_count::text
+            FROM per_session
+        `,
+        [installationId]
+    );
+
+    let repaired = 0;
+    let ambiguous = 0;
+
+    for (const row of result.rows) {
+        if (
+            Number(row.owner_phone_count) !== 1 ||
+            Number(row.external_phone_count) !== 1 ||
+            !row.owner_phone ||
+            !row.external_phone
+        ) {
+            ambiguous += 1;
+            continue;
+        }
+
+        const client = await db.connect();
+
+        try {
+            await client.query('BEGIN');
+
+            /*
+             * Fill the authoritative owner's phone number,
+             * but never change its owner identity.
+             */
+            await client.query(
+                `
+                    UPDATE zoom_sms_participants
+                    SET phone_number = COALESCE(
+                        phone_number,
+                        $1
+                    )
+                    WHERE sms_session_id = $2
+                      AND is_session_owner = TRUE
+                      AND owner_type = 'user'
+                      AND owner_id = $3
+                `,
+                [
+                    row.owner_phone,
+                    Number(row.sms_session_id),
+                    row.owner_id
+                ]
+            );
+
+            /*
+             * Add the external participant only when one
+             * does not already exist.
+             */
+            await client.query(
+                `
+                    INSERT INTO zoom_sms_participants (
+                        sms_session_id,
+                        owner_type,
+                        owner_id,
+                        is_session_owner,
+                        phone_number,
+                        display_name
+                    )
+                    SELECT
+                        $1,
+                        NULL,
+                        NULL,
+                        FALSE,
+                        $2,
+                        NULL
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM zoom_sms_participants p
+                        WHERE p.sms_session_id = $1
+                          AND p.is_session_owner = FALSE
+                          AND p.phone_number = $2
+                    )
+                `,
+                [
+                    Number(row.sms_session_id),
+                    row.external_phone
+                ]
+            );
+
+            await client.query('COMMIT');
+
+            repaired += 1;
+        } catch (error) {
+            try {
+                await client.query('ROLLBACK');
+            } catch {
+                // Preserve original error.
+            }
+
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    console.log(
+        '[ZOOM SMS HISTORICAL PARTICIPANT DETAIL BACKFILL]',
+        {
+            installationId,
+            candidates: result.rows.length,
+            repaired,
+            ambiguous
+        }
+    );
+
+    return {
+        candidates: result.rows.length,
+        repaired,
+        ambiguous
+    };
+}
+
 export async function cleanupEmptyWebhookSmsSession(
     installationId: string,
     smsSessionId: number
