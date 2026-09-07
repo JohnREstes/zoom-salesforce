@@ -71,26 +71,41 @@ export async function sendSmsForSalesforceContact(
         throw new Error('SMS message cannot be empty');
     }
 
-    /*
-     * First preference: preserve the existing proven behavior.
-     * If this Contact already has a matched conversation,
-     * reply through that conversation's Zoom participants.
-     */
     const sessionResult = await db.query<SmsSessionRow>(
         `
-        SELECT
-            id,
-            zoom_session_id
-        FROM zoom_sms_sessions
-        WHERE installation_id = $1
-          AND salesforce_contact_id = $2
-        ORDER BY
-            last_access_time DESC NULLS LAST,
-            id DESC
-        LIMIT 1
+            WITH authorized_user AS (
+                SELECT zoom_user_id
+                FROM communic8_users
+                WHERE installation_id = $1
+                AND salesforce_user_id = $2
+                AND is_active = TRUE
+                AND zoom_user_id IS NOT NULL
+                LIMIT 1
+            )
+            SELECT
+                s.id,
+                s.zoom_session_id
+            FROM zoom_sms_sessions s
+            INNER JOIN authorized_user au
+                ON TRUE
+            WHERE s.installation_id = $1
+            AND s.salesforce_contact_id = $3
+            AND EXISTS (
+                    SELECT 1
+                    FROM zoom_sms_participants p
+                    WHERE p.sms_session_id = s.id
+                    AND p.is_session_owner = TRUE
+                    AND p.owner_type = 'user'
+                    AND p.owner_id = au.zoom_user_id
+                )
+            ORDER BY
+                s.last_access_time DESC NULLS LAST,
+                s.id DESC
+            LIMIT 1
         `,
         [
             installationId,
+            salesforceUserId,
             contactId
         ]
     );
