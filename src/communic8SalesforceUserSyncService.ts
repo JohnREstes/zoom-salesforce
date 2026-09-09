@@ -82,22 +82,77 @@ export async function syncCommunik8UsersFromSalesforce(
                 continue;
             }
 
+            const candidateResult =
+                await db.query<{
+                    id: number;
+                }>(
+                    `
+                        SELECT id
+                        FROM communic8_users
+                        WHERE installation_id = $1
+                        AND LOWER(zoom_email) = $2
+                        ORDER BY id
+                        LIMIT 2
+                    `,
+                    [
+                        installationId,
+                        salesforceEmail
+                    ]
+                );
+
+            /*
+            * Identity matching must fail closed.
+            *
+            * Zero Zoom matches:
+            *   Salesforce user remains unmatched.
+            *
+            * Multiple Zoom matches:
+            *   Ambiguous identity. Do not update any row.
+            *
+            * Exactly one Zoom match:
+            *   Safe to establish the durable Salesforce ↔ Zoom
+            *   identity relationship.
+            */
+            if (candidateResult.rowCount !== 1) {
+                unmatchedSalesforceUsers++;
+
+                if (
+                    candidateResult.rowCount !== null &&
+                    candidateResult.rowCount > 1
+                ) {
+                    console.warn(
+                        '[COMMUNIK8 USER IDENTITY MATCH AMBIGUOUS]',
+                        {
+                            installationId,
+                            candidateCount:
+                                candidateResult.rowCount
+                        }
+                    );
+                }
+
+                continue;
+            }
+
+            const communic8UserId =
+                candidateResult.rows[0].id;
+
             const matchResult =
                 await db.query(
                     `
-                    UPDATE communic8_users
-                    SET
-                        salesforce_user_id = $1,
-                        salesforce_email = $2,
-                        matched_at = NOW(),
-                        updated_at = NOW()
-                    WHERE installation_id = $3
-                      AND LOWER(zoom_email) = $2
-                    RETURNING id
+                        UPDATE communic8_users
+                        SET
+                            salesforce_user_id = $1,
+                            salesforce_email = $2,
+                            matched_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = $3
+                        AND installation_id = $4
+                        RETURNING id
                     `,
                     [
                         salesforceUserId,
                         salesforceEmail,
+                        communic8UserId,
                         installationId
                     ]
                 );
