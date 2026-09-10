@@ -879,6 +879,22 @@ function isSalesforceRecordId(value: string): boolean {
     return /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
 }
 
+function getSalesforceUserId(
+    req: express.Request
+): string | null {
+    const value =
+        req.headers['x-communik8-salesforce-user-id'];
+
+    if (
+        typeof value !== 'string' ||
+        !isSalesforceRecordId(value)
+    ) {
+        return null;
+    }
+
+    return value;
+}
+
 async function resolveSalesforceApiInstallation(
     req: express.Request
 ): Promise<string | null> {
@@ -941,9 +957,18 @@ app.get(
                 });
             }
 
+            const salesforceUserId = getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
             const conversations =
                 await getSmsConversationsForContact(
                     installationId,
+                    salesforceUserId,
                     contactId,
                     {
                         sessionLimit:
@@ -1002,9 +1027,18 @@ app.get(
                 });
             }
 
+            const salesforceUserId = getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
             const conversations =
                 await getSmsConversationsForAccount(
                     installationId,
+                    salesforceUserId,
                     accountId,
                     {
                         sessionLimit:
