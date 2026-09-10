@@ -241,6 +241,60 @@ async function handleZoomWebhook(
                 event.event === 'phone.sms_received'
             )
         ) {
+            // Zoom documents owner.id as the SMS owner identity. Shared
+            // owners require a separate authorization model; never fall
+            // back to sender/recipient phone numbers or member IDs.
+            const owner = event?.payload?.object?.owner;
+
+            if (
+                owner?.type !== 'user' ||
+                typeof owner.id !== 'string' ||
+                !owner.id.trim()
+            ) {
+                console.log('[ZOOM SMS WEBHOOK IGNORED]', {
+                    installationId: installation.id,
+                    reason: 'Missing or unsupported SMS owner'
+                });
+                return res.sendStatus(200);
+            }
+
+            const ownerResult = await db.query<{
+                salesforce_user_id: string | null;
+                is_active: boolean;
+                is_sms_capable: boolean;
+                is_communik8_enabled: boolean;
+            }>(
+                `
+                SELECT
+                    salesforce_user_id,
+                    is_active,
+                    is_sms_capable,
+                    is_communik8_enabled
+                FROM communic8_users
+                WHERE installation_id = $1
+                  AND zoom_user_id = $2
+                LIMIT 2
+                `,
+                [installation.id, owner.id]
+            );
+
+            const authorizedOwner = ownerResult.rows[0];
+
+            if (
+                ownerResult.rows.length !== 1 ||
+                !authorizedOwner?.salesforce_user_id ||
+                !isSalesforceRecordId(authorizedOwner.salesforce_user_id) ||
+                authorizedOwner.is_active !== true ||
+                authorizedOwner.is_sms_capable !== true ||
+                authorizedOwner.is_communik8_enabled !== true
+            ) {
+                console.log('[ZOOM SMS WEBHOOK IGNORED]', {
+                    installationId: installation.id,
+                    reason: 'SMS owner is not uniquely mapped and entitled'
+                });
+                return res.sendStatus(200);
+            }
+
             const zoomSessionId =
                 event?.payload?.object?.session_id;
 
