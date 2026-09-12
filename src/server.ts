@@ -71,7 +71,8 @@ import {
 } from './zoomUserOAuthService.js';
 
 import {
-    saveZoomUserOAuthTokens
+    saveZoomUserOAuthTokens,
+    getZoomUserOAuthStatus
 } from './zoomUserTokenService.js';
 
 dotenv.config();
@@ -968,6 +969,106 @@ app.get(
             return res.status(500).send(
                 'An unexpected error occurred while connecting Zoom Phone.'
             );
+        }
+    }
+);
+
+app.get(
+    '/api/salesforce/zoom/user/status',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error:
+                        'Missing or invalid Salesforce user identity'
+                });
+            }
+
+            /*
+             * This also gives a newly-added Salesforce user
+             * one opportunity to self-heal their SF ↔ Zoom
+             * mapping automatically.
+             */
+            const communic8User =
+                await resolveCommunik8CurrentUser(
+                    installationId,
+                    salesforceUserId
+                );
+
+            if (!communic8User) {
+                return res.status(200).json({
+                    mapped: false,
+                    enabled: false,
+                    active: false,
+                    smsCapable: false,
+                    zoomConnected: false,
+                    ready: false,
+                    status: 'NOT_MAPPED'
+                });
+            }
+
+            const oauthStatus =
+                await getZoomUserOAuthStatus(
+                    installationId,
+                    communic8User.id
+                );
+
+            let status:
+                | 'NOT_ENABLED'
+                | 'ZOOM_INACTIVE'
+                | 'SMS_NOT_AVAILABLE'
+                | 'ZOOM_NOT_CONNECTED'
+                | 'READY';
+
+            if (!communic8User.isCommunik8Enabled) {
+                status = 'NOT_ENABLED';
+            } else if (!communic8User.isActive) {
+                status = 'ZOOM_INACTIVE';
+            } else if (!communic8User.isSmsCapable) {
+                status = 'SMS_NOT_AVAILABLE';
+            } else if (!oauthStatus.connected) {
+                status = 'ZOOM_NOT_CONNECTED';
+            } else {
+                status = 'READY';
+            }
+
+            return res.status(200).json({
+                mapped: true,
+                enabled:
+                    communic8User.isCommunik8Enabled,
+                active:
+                    communic8User.isActive,
+                smsCapable:
+                    communic8User.isSmsCapable,
+                zoomConnected:
+                    oauthStatus.connected,
+                ready:
+                    status === 'READY',
+                status
+            });
+
+        } catch (error) {
+            console.error(
+                '[ZOOM USER STATUS ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error:
+                    'Unable to determine Zoom Phone connection status.'
+            });
         }
     }
 );
