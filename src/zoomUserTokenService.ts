@@ -27,12 +27,12 @@ function getZoomOAuthCredentials(): {
     clientId: string;
     clientSecret: string;
 } {
-    const clientId = process.env.ZOOM_CLIENT_ID;
-    const clientSecret = process.env.ZOOM_CLIENT_SECRET;
+    const clientId = process.env.ZOOM_USER_CLIENT_ID;
+    const clientSecret = process.env.ZOOM_USER_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
         throw new Error(
-            'Zoom OAuth client credentials are not configured'
+            'Zoom user OAuth client credentials are not configured'
         );
     }
 
