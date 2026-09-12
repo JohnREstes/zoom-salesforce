@@ -61,6 +61,19 @@ import {
     discoverSalesforceSmsHistory
 } from './salesforceSmsHistoryDiscoveryService.js';
 
+import {
+    resolveCommunik8CurrentUser
+} from './communic8CurrentUserService.js';
+
+import {
+    createZoomUserOAuthAttempt,
+    consumeZoomUserOAuthAttempt
+} from './zoomUserOAuthService.js';
+
+import {
+    saveZoomUserOAuthTokens
+} from './zoomUserTokenService.js';
+
 dotenv.config();
 
 const app = express();
@@ -596,6 +609,369 @@ app.get('/auth/zoom/callback', async (req, res) => {
     }
 });
 
+app.get(
+    '/auth/zoom/user/callback',
+    async (req, res) => {
+        try {
+            const code =
+                req.query.code;
+
+            const state =
+                req.query.state;
+
+            const oauthError =
+                req.query.error;
+
+            /*
+             * Zoom can redirect here when the user denies
+             * authorization.
+             */
+            if (
+                oauthError &&
+                typeof oauthError === 'string'
+            ) {
+                console.warn(
+                    '[ZOOM USER OAUTH DENIED]',
+                    {
+                        error: oauthError
+                    }
+                );
+
+                return res.status(400).send(`
+                    <html>
+                        <body style="
+                            font-family: Arial, sans-serif;
+                            padding: 40px;
+                            text-align: center;
+                        ">
+                            <h1>Zoom Phone was not connected</h1>
+                            <p>
+                                Authorization was cancelled or denied.
+                            </p>
+                            <p>You can close this window.</p>
+                        </body>
+                    </html>
+                `);
+            }
+
+            if (
+                !code ||
+                typeof code !== 'string'
+            ) {
+                return res.status(400).send(
+                    'Missing Zoom authorization code.'
+                );
+            }
+
+            if (
+                !state ||
+                typeof state !== 'string'
+            ) {
+                return res.status(400).send(
+                    'Missing OAuth state.'
+                );
+            }
+
+            /*
+             * This deletes the stored attempt as it is read,
+             * making the callback state single-use.
+             */
+            const oauthAttempt =
+                await consumeZoomUserOAuthAttempt(
+                    state
+                );
+
+            if (!oauthAttempt) {
+                return res.status(400).send(
+                    'Invalid or expired Zoom OAuth state.'
+                );
+            }
+
+            const clientId =
+                process.env.ZOOM_USER_CLIENT_ID;
+
+            const clientSecret =
+                process.env.ZOOM_USER_CLIENT_SECRET;
+
+            const redirectUri =
+                process.env.ZOOM_USER_REDIRECT_URI;
+
+            if (
+                !clientId ||
+                !clientSecret ||
+                !redirectUri
+            ) {
+                console.error(
+                    '[ZOOM USER OAUTH] Missing OAuth configuration'
+                );
+
+                return res.status(500).send(
+                    'Zoom user OAuth is not configured.'
+                );
+            }
+
+            const basicAuth =
+                Buffer
+                    .from(
+                        `${clientId}:${clientSecret}`
+                    )
+                    .toString('base64');
+
+            const tokenBody =
+                new URLSearchParams();
+
+            tokenBody.set(
+                'grant_type',
+                'authorization_code'
+            );
+
+            tokenBody.set(
+                'code',
+                code
+            );
+
+            tokenBody.set(
+                'redirect_uri',
+                redirectUri
+            );
+
+            const tokenResponse =
+                await fetch(
+                    'https://zoom.us/oauth/token',
+                    {
+                        method: 'POST',
+                        headers: {
+                            Authorization:
+                                `Basic ${basicAuth}`,
+                            'Content-Type':
+                                'application/x-www-form-urlencoded'
+                        },
+                        body: tokenBody
+                    }
+                );
+
+            const tokenData =
+                await tokenResponse
+                    .json()
+                    .catch(() => null) as {
+                        access_token?: string;
+                        refresh_token?: string;
+                        expires_in?: number;
+                        scope?: string;
+                        token_type?: string;
+                    } | null;
+
+            if (
+                !tokenResponse.ok ||
+                !tokenData?.access_token ||
+                !tokenData.refresh_token ||
+                !tokenData.expires_in
+            ) {
+                console.error(
+                    '[ZOOM USER OAUTH TOKEN EXCHANGE FAILED]',
+                    {
+                        status:
+                            tokenResponse.status,
+                        installationId:
+                            oauthAttempt.installationId
+                    }
+                );
+
+                return res.status(502).send(
+                    'Zoom authorization could not be completed.'
+                );
+            }
+
+            /*
+             * SECURITY CHECK:
+             *
+             * The Zoom account that actually authorized the
+             * user-managed app must be the same Zoom user that
+             * Communik8 already mapped to this Salesforce user.
+             */
+            const identityResponse =
+                await fetch(
+                    'https://api.zoom.us/v2/users/me',
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${tokenData.access_token}`
+                        }
+                    }
+                );
+
+            const zoomIdentity =
+                await identityResponse
+                    .json()
+                    .catch(() => null) as {
+                        id?: string;
+                    } | null;
+
+            if (
+                !identityResponse.ok ||
+                !zoomIdentity?.id
+            ) {
+                console.error(
+                    '[ZOOM USER IDENTITY LOOKUP FAILED]',
+                    {
+                        status:
+                            identityResponse.status,
+                        installationId:
+                            oauthAttempt.installationId
+                    }
+                );
+
+                return res.status(502).send(
+                    'Unable to verify the Zoom user identity.'
+                );
+            }
+
+            if (
+                zoomIdentity.id !==
+                oauthAttempt.expectedZoomUserId
+            ) {
+                console.warn(
+                    '[ZOOM USER OAUTH IDENTITY MISMATCH]',
+                    {
+                        installationId:
+                            oauthAttempt.installationId,
+                        communic8UserId:
+                            oauthAttempt.communic8UserId
+                    }
+                );
+
+                /*
+                 * Do NOT save these tokens.
+                 *
+                 * The person authorized a different Zoom
+                 * account than the one mapped to their
+                 * Salesforce identity.
+                 */
+                return res.status(403).send(`
+                    <html>
+                        <body style="
+                            font-family: Arial, sans-serif;
+                            padding: 40px;
+                            text-align: center;
+                        ">
+                            <h1>Wrong Zoom account</h1>
+                            <p>
+                                The Zoom account you authorized
+                                does not match your Communik8
+                                account.
+                            </p>
+                            <p>
+                                Please sign in with your assigned
+                                Zoom Phone account and try again.
+                            </p>
+                            <p>You can close this window.</p>
+                        </body>
+                    </html>
+                `);
+            }
+
+            /*
+             * Re-check the durable mapping before committing
+             * the credential. This protects against a mapping
+             * changing while OAuth was in progress.
+             */
+            const currentUser =
+                await resolveCommunik8CurrentUser(
+                    oauthAttempt.installationId,
+                    oauthAttempt.salesforceUserId
+                );
+
+            if (
+                !currentUser ||
+                currentUser.id !==
+                    oauthAttempt.communic8UserId ||
+                currentUser.zoomUserId !==
+                    oauthAttempt.expectedZoomUserId ||
+                !currentUser.isCommunik8Enabled ||
+                !currentUser.isActive ||
+                !currentUser.isSmsCapable
+            ) {
+                console.warn(
+                    '[ZOOM USER OAUTH MAPPING CHANGED]',
+                    {
+                        installationId:
+                            oauthAttempt.installationId,
+                        communic8UserId:
+                            oauthAttempt.communic8UserId
+                    }
+                );
+
+                return res.status(409).send(
+                    'Your Communik8 user configuration changed during authorization. Please try again.'
+                );
+            }
+
+            await saveZoomUserOAuthTokens({
+                installationId:
+                    oauthAttempt.installationId,
+
+                communic8UserId:
+                    oauthAttempt.communic8UserId,
+
+                zoomUserId:
+                    zoomIdentity.id,
+
+                accessToken:
+                    tokenData.access_token,
+
+                refreshToken:
+                    tokenData.refresh_token,
+
+                expiresIn:
+                    tokenData.expires_in,
+
+                scope:
+                    tokenData.scope ?? null,
+
+                tokenType:
+                    tokenData.token_type ?? null
+            });
+
+            console.log(
+                '[ZOOM USER OAUTH SUCCESS]',
+                {
+                    installationId:
+                        oauthAttempt.installationId,
+                    communic8UserId:
+                        oauthAttempt.communic8UserId
+                }
+            );
+
+            return res.status(200).send(`
+                <html>
+                    <body style="
+                        font-family: Arial, sans-serif;
+                        padding: 40px;
+                        text-align: center;
+                    ">
+                        <h1>Zoom Phone connected</h1>
+                        <p>
+                            Your Communik8 Zoom Phone connection
+                            was completed successfully.
+                        </p>
+                        <p>You can close this window.</p>
+                    </body>
+                </html>
+            `);
+
+        } catch (error) {
+            console.error(
+                '[ZOOM USER OAUTH CALLBACK ERROR]',
+                error
+            );
+
+            return res.status(500).send(
+                'An unexpected error occurred while connecting Zoom Phone.'
+            );
+        }
+    }
+);
+
 app.get('/auth/zoom/start/:installationId', async (req, res) => {
     try {
         const installationId = req.params.installationId;
@@ -1108,6 +1484,157 @@ function parsePositiveIntegerQuery(
 
     return parsed;
 }
+
+app.post(
+    '/api/salesforce/zoom/user/oauth/start',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error:
+                        'Missing or invalid Salesforce user identity'
+                });
+            }
+
+            /*
+             * Fast path uses the existing durable mapping.
+             *
+             * If the Salesforce user has not been mapped yet,
+             * this service automatically refreshes the Zoom
+             * directory and Salesforce matching before retrying.
+             */
+            const communic8User =
+                await resolveCommunik8CurrentUser(
+                    installationId,
+                    salesforceUserId
+                );
+
+            if (!communic8User) {
+                return res.status(409).json({
+                    error: 'ZOOM_USER_NOT_MAPPED',
+                    message:
+                        'No matching Zoom Phone user could be found for this Salesforce user.'
+                });
+            }
+
+            /*
+             * Mapping alone does not grant a Communik8 license.
+             */
+            if (!communic8User.isCommunik8Enabled) {
+                return res.status(403).json({
+                    error: 'COMMUNIK8_NOT_ENABLED',
+                    message:
+                        'Communik8 is not enabled for this user.'
+                });
+            }
+
+            if (!communic8User.isActive) {
+                return res.status(409).json({
+                    error: 'ZOOM_USER_INACTIVE',
+                    message:
+                        'The mapped Zoom Phone user is inactive.'
+                });
+            }
+
+            if (!communic8User.isSmsCapable) {
+                return res.status(409).json({
+                    error: 'ZOOM_SMS_NOT_AVAILABLE',
+                    message:
+                        'The mapped Zoom Phone user is not currently eligible for SMS.'
+                });
+            }
+
+            const clientId =
+                process.env.ZOOM_USER_CLIENT_ID;
+
+            const redirectUri =
+                process.env.ZOOM_USER_REDIRECT_URI;
+
+            if (!clientId || !redirectUri) {
+                console.error(
+                    '[ZOOM USER OAUTH] Missing user OAuth configuration'
+                );
+
+                return res.status(500).json({
+                    error:
+                        'Zoom user OAuth is not configured.'
+                });
+            }
+
+            const oauthAttempt =
+                await createZoomUserOAuthAttempt({
+                    installationId,
+                    communic8UserId:
+                        communic8User.id,
+                    salesforceUserId,
+                    expectedZoomUserId:
+                        communic8User.zoomUserId
+                });
+
+            const authorizeUrl =
+                new URL(
+                    'https://zoom.us/oauth/authorize'
+                );
+
+            authorizeUrl.searchParams.set(
+                'response_type',
+                'code'
+            );
+
+            authorizeUrl.searchParams.set(
+                'client_id',
+                clientId
+            );
+
+            authorizeUrl.searchParams.set(
+                'redirect_uri',
+                redirectUri
+            );
+
+            authorizeUrl.searchParams.set(
+                'state',
+                oauthAttempt.state
+            );
+
+            console.log(
+                '[ZOOM USER OAUTH START]',
+                {
+                    installationId,
+                    communic8UserId:
+                        communic8User.id
+                }
+            );
+
+            return res.status(200).json({
+                authorizationUrl:
+                    authorizeUrl.toString()
+            });
+
+        } catch (error) {
+            console.error(
+                '[ZOOM USER OAUTH START ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error:
+                    'Unable to start Zoom user authorization.'
+            });
+        }
+    }
+);
 
 app.get(
     '/api/salesforce/sms/templates',
