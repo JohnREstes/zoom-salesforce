@@ -108,7 +108,7 @@ export async function saveZoomUserOAuthTokens(
         `,
         [
             options.installationId,
-            options.communik8UserId,
+            options.communic8UserId,
             options.zoomUserId,
             encrypt(options.accessToken),
             encrypt(options.refreshToken),
