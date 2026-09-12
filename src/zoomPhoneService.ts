@@ -240,7 +240,6 @@ export async function sendSmsMessage(
         fromPhoneNumber: string;
         toPhoneNumber: string;
         message: string;
-        senderUserId?: string;
     }
 ): Promise<any> {
     const accessToken =
@@ -279,8 +278,6 @@ export async function sendSmsMessage(
                 ],
                 message,
                 sender: {
-                    user_id:
-                        options.senderUserId ?? 'me',
                     phone_number:
                         options.fromPhoneNumber
                 }

@@ -176,8 +176,6 @@ export async function sendSmsForSalesforceContact(
                     fromPhoneNumber,
                     toPhoneNumber,
                     message: cleanMessage,
-                    senderUserId:
-                        owner.owner_id ?? undefined
                 }
             );
 
@@ -288,12 +286,9 @@ export async function sendSmsForSalesforceContact(
         await sendSmsMessage(
             installationId,
             {
-                fromPhoneNumber:
-                    sender.zoom_phone_number,
+                fromPhoneNumber: sender.zoom_phone_number,
                 toPhoneNumber,
-                message: cleanMessage,
-                senderUserId:
-                    sender.zoom_user_id
+                message: cleanMessage
             }
         );
 
