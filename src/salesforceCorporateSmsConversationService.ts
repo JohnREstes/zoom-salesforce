@@ -258,7 +258,7 @@ export async function getCorporateSmsConversationsForContact(
                     s.salesforce_account_id,
 
                     cu.id
-                        AS owner_communik8_user_id,
+                        AS owner_communic8_user_id,
                     cu.salesforce_user_id
                         AS owner_salesforce_user_id,
                     cu.salesforce_email
@@ -307,7 +307,7 @@ export async function getCorporateSmsConversationsForContact(
                 s.salesforce_contact_id,
                 s.salesforce_account_id,
 
-                s.owner_communik8_user_id,
+                s.owner_communic8_user_id,
                 s.owner_salesforce_user_id,
                 s.owner_salesforce_email,
                 s.owner_zoom_user_id,
@@ -382,7 +382,7 @@ export async function getCorporateSmsConversationsForContact(
 
                 owner: {
                     communic8UserId:
-                        row.owner_communik8_user_id,
+                        row.owner_communic8_user_id,
 
                     salesforceUserId:
                         row.owner_salesforce_user_id,
@@ -400,7 +400,7 @@ export async function getCorporateSmsConversationsForContact(
                         row.owner_zoom_phone_number,
 
                     isCurrentUser:
-                        row.owner_communik8_user_id ===
+                        row.owner_communic8_user_id ===
                         requestingCommunik8UserId
                 },
 
