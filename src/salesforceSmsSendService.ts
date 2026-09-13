@@ -17,11 +17,13 @@ type SmsParticipantRow = {
 };
 
 type Communik8UserRow = {
+    id: number;
     zoom_user_id: string | null;
     zoom_phone_number: string | null;
     zoom_phone_number_count: number;
     is_sms_capable: boolean;
     is_active: boolean;
+    is_communik8_enabled: boolean;
 };
 
 function normalizeSmsPhoneNumber(
@@ -71,16 +73,53 @@ export async function sendSmsForSalesforceContact(
         throw new Error('SMS message cannot be empty');
     }
 
+    const userResult =
+        await db.query<Communik8UserRow>(
+            `
+            SELECT
+                id,
+                zoom_user_id,
+                zoom_phone_number,
+                zoom_phone_number_count,
+                is_sms_capable,
+                is_active,
+                is_communik8_enabled
+            FROM communic8_users
+            WHERE installation_id = $1
+            AND salesforce_user_id = $2
+            LIMIT 2
+            `,
+            [
+                installationId,
+                salesforceUserId
+            ]
+        );
+
+    if (userResult.rowCount !== 1) {
+        throw new Error(
+            'Salesforce user is not uniquely mapped to a Communik8 user'
+        );
+    }
+
+    const sender = userResult.rows[0];
+
+    if (
+        !sender.is_communik8_enabled ||
+        !sender.is_active ||
+        !sender.is_sms_capable ||
+        sender.zoom_phone_number_count !== 1 ||
+        !sender.zoom_user_id ||
+        !sender.zoom_phone_number
+    ) {
+        throw new Error(
+            'Salesforce user is not authorized for SMS sending'
+        );
+    }
+
     const sessionResult = await db.query<SmsSessionRow>(
         `
             WITH authorized_user AS (
-                SELECT zoom_user_id
-                FROM communic8_users
-                WHERE installation_id = $1
-                AND salesforce_user_id = $2
-                AND is_active = TRUE
-                AND zoom_user_id IS NOT NULL
-                LIMIT 1
+                SELECT $4::text AS zoom_user_id
             )
             SELECT
                 s.id,
@@ -106,7 +145,8 @@ export async function sendSmsForSalesforceContact(
         [
             installationId,
             salesforceUserId,
-            contactId
+            contactId,
+            sender.zoom_user_id
         ]
     );
 
@@ -172,10 +212,11 @@ export async function sendSmsForSalesforceContact(
         const zoomResponse =
             await sendSmsMessage(
                 installationId,
+                sender.id,
                 {
                     fromPhoneNumber,
                     toPhoneNumber,
-                    message: cleanMessage,
+                    message: cleanMessage
                 }
             );
 
@@ -235,56 +276,13 @@ export async function sendSmsForSalesforceContact(
         normalizeSmsPhoneNumber(rawToPhoneNumber);
 
     /*
-     * Resolve the current Salesforce user to their own
-     * deterministic Zoom Phone sender identity.
-     */
-    const userResult =
-        await db.query<Communik8UserRow>(
-            `
-            SELECT
-                zoom_user_id,
-                zoom_phone_number,
-                zoom_phone_number_count,
-                is_sms_capable,
-                is_active
-            FROM communic8_users
-            WHERE installation_id = $1
-              AND salesforce_user_id = $2
-            LIMIT 1
-            `,
-            [
-                installationId,
-                salesforceUserId
-            ]
-        );
-
-    if (userResult.rowCount !== 1) {
-        throw new Error(
-            'Salesforce user is not mapped to a Zoom Phone user'
-        );
-    }
-
-    const sender = userResult.rows[0];
-
-    if (
-        !sender.is_active ||
-        !sender.is_sms_capable ||
-        sender.zoom_phone_number_count !== 1 ||
-        !sender.zoom_user_id ||
-        !sender.zoom_phone_number
-    ) {
-        throw new Error(
-            'Salesforce user does not have a deterministic SMS sender'
-        );
-    }
-
-    /*
      * Zoom's send-message endpoint can initiate a new SMS
      * conversation; an existing session ID is not required.
      */
     const zoomResponse =
         await sendSmsMessage(
             installationId,
+            sender.id,
             {
                 fromPhoneNumber: sender.zoom_phone_number,
                 toPhoneNumber,
