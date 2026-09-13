@@ -1,5 +1,9 @@
 import { getValidZoomAccessToken } from './zoomTokenService.js';
 
+import {
+    getValidZoomUserAccessToken
+} from './zoomUserTokenService.js';
+
 const ZOOM_API_BASE_URL = 'https://api.zoom.us/v2';
 
 export type GetSmsSessionsOptions = {
@@ -236,14 +240,25 @@ export async function syncSmsSession(
 
 export async function sendSmsMessage(
     installationId: string,
+    communic8UserId: number,
     options: {
         fromPhoneNumber: string;
         toPhoneNumber: string;
         message: string;
     }
 ): Promise<any> {
+    /*
+     * Outbound SMS must use the OAuth credential belonging
+     * to the specific Communik8/Zoom user.
+     *
+     * There is intentionally NO fallback to the tenant/admin
+     * Zoom credential.
+     */
     const accessToken =
-        await getValidZoomAccessToken(installationId);
+        await getValidZoomUserAccessToken(
+            installationId,
+            communic8UserId
+        );
 
     const message = options.message.trim();
 
@@ -291,6 +306,7 @@ export async function sendSmsMessage(
     if (!response.ok) {
         console.error('[ZOOM SMS SEND FAILED]', {
             installationId,
+            communic8UserId,
             status: response.status,
             zoomCode:
                 typeof responseBody === 'object' &&
@@ -326,6 +342,7 @@ export async function sendSmsMessage(
 
     console.log('[ZOOM SMS SEND SUCCESS]', {
         installationId,
+        communic8UserId,
         hasMessageId: Boolean(
             responseBody?.message_id
         )
