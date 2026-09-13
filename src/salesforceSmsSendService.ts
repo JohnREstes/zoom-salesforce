@@ -144,7 +144,6 @@ export async function sendSmsForSalesforceContact(
         `,
         [
             installationId,
-            salesforceUserId,
             contactId,
             sender.zoom_user_id
         ]
