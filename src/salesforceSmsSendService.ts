@@ -119,7 +119,7 @@ export async function sendSmsForSalesforceContact(
     const sessionResult = await db.query<SmsSessionRow>(
         `
             WITH authorized_user AS (
-                SELECT $4::text AS zoom_user_id
+                SELECT $3::text AS zoom_user_id
             )
             SELECT
                 s.id,
@@ -128,15 +128,15 @@ export async function sendSmsForSalesforceContact(
             INNER JOIN authorized_user au
                 ON TRUE
             WHERE s.installation_id = $1
-            AND s.salesforce_contact_id = $3
+            AND s.salesforce_contact_id = $2
             AND EXISTS (
-                    SELECT 1
-                    FROM zoom_sms_participants p
-                    WHERE p.sms_session_id = s.id
-                    AND p.is_session_owner = TRUE
-                    AND p.owner_type = 'user'
-                    AND p.owner_id = au.zoom_user_id
-                )
+                SELECT 1
+                FROM zoom_sms_participants p
+                WHERE p.sms_session_id = s.id
+                AND p.is_session_owner = TRUE
+                AND p.owner_type = 'user'
+                AND p.owner_id = au.zoom_user_id
+            )
             ORDER BY
                 s.last_access_time DESC NULLS LAST,
                 s.id DESC
