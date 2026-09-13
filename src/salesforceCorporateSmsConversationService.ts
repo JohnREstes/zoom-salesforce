@@ -313,6 +313,7 @@ export async function getCorporateSmsConversationsForContact(
 
                 s.owner_communic8_user_id,
                 s.owner_salesforce_user_id,
+                s.owner_salesforce_name,
                 s.owner_salesforce_email,
                 s.owner_zoom_user_id,
                 s.owner_zoom_email,
