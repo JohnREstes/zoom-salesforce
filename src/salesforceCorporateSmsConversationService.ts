@@ -1,8 +1,13 @@
 import { db } from './db.js';
+
 import {
     COMMUNIK8_CAPABILITIES,
     hasCommunik8UserCapability
 } from './communik8CapabilityService.js';
+
+import {
+    syncViewAllMessagesCapabilityFromSalesforce
+} from './salesforceCapabilitySyncService.js';
 
 export type CorporateSmsMessage = {
     id: string;
@@ -124,12 +129,18 @@ function parseJsonValue(value: unknown): unknown {
 
 /**
  * Resolve and authorize the Salesforce user requesting organization-wide
- * history. Mapping and product entitlement are intentionally separate:
+ * history.
  *
- *   Salesforce user -> communic8_users -> VIEW_ALL_MESSAGES capability
+ * The authorization sequence is deliberately fail-closed:
  *
- * The caller must be a normal enabled Communik8 user and must also have the
- * elevated backend capability. Salesforce UI state alone is never sufficient.
+ *   Salesforce user
+ *       -> exact Communik8 user mapping
+ *       -> normal Communik8 user entitlement
+ *       -> synchronize Salesforce Custom Permission
+ *       -> durable VIEW_ALL_MESSAGES capability
+ *
+ * This means Salesforce administration controls who receives the elevated
+ * user grant, while the backend still enforces its own durable capability.
  */
 async function getAuthorizedCorporateViewer(
     installationId: string,
@@ -159,8 +170,28 @@ async function getAuthorizedCorporateViewer(
         throw new CorporateMessageAccessDeniedError();
     }
 
-    const communic8UserId = result.rows[0].id;
+    const communic8UserId =
+        result.rows[0].id;
 
+    /*
+     * Salesforce is the administrative source of truth for this user's
+     * elevated access. Synchronize before every corporate-history read so
+     * permission assignment/removal takes effect without a separate admin
+     * job or manual database operation.
+     *
+     * If Salesforce cannot be checked successfully, the sync service throws
+     * and access is not granted from stale UI state.
+     */
+    await syncViewAllMessagesCapabilityFromSalesforce(
+        installationId,
+        salesforceUserId,
+        communic8UserId
+    );
+
+    /*
+     * Re-check the backend capability after synchronization.
+     * This keeps the actual data-access decision inside Communik8.
+     */
     const allowed =
         await hasCommunik8UserCapability(
             installationId,
@@ -227,7 +258,7 @@ export async function getCorporateSmsConversationsForContact(
                     s.salesforce_account_id,
 
                     cu.id
-                        AS owner_communic8_user_id,
+                        AS owner_communik8_user_id,
                     cu.salesforce_user_id
                         AS owner_salesforce_user_id,
                     cu.salesforce_email
@@ -276,7 +307,7 @@ export async function getCorporateSmsConversationsForContact(
                 s.salesforce_contact_id,
                 s.salesforce_account_id,
 
-                s.owner_communic8_user_id,
+                s.owner_communik8_user_id,
                 s.owner_salesforce_user_id,
                 s.owner_salesforce_email,
                 s.owner_zoom_user_id,
@@ -351,7 +382,7 @@ export async function getCorporateSmsConversationsForContact(
 
                 owner: {
                     communic8UserId:
-                        row.owner_communic8_user_id,
+                        row.owner_communik8_user_id,
 
                     salesforceUserId:
                         row.owner_salesforce_user_id,
@@ -369,7 +400,7 @@ export async function getCorporateSmsConversationsForContact(
                         row.owner_zoom_phone_number,
 
                     isCurrentUser:
-                        row.owner_communic8_user_id ===
+                        row.owner_communik8_user_id ===
                         requestingCommunik8UserId
                 },
 
