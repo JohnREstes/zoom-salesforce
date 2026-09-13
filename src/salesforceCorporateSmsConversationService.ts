@@ -22,6 +22,7 @@ export type CorporateSmsMessage = {
 export type CorporateSmsConversationOwner = {
     communic8UserId: number;
     salesforceUserId: string | null;
+    salesforceName: string | null;
     salesforceEmail: string | null;
     zoomUserId: string;
     zoomEmail: string | null;
@@ -58,6 +59,7 @@ type CorporateConversationRow = {
 
     owner_communic8_user_id: number;
     owner_salesforce_user_id: string | null;
+    owner_salesforce_name: string | null;
     owner_salesforce_email: string | null;
     owner_zoom_user_id: string;
     owner_zoom_email: string | null;
@@ -261,6 +263,8 @@ export async function getCorporateSmsConversationsForContact(
                         AS owner_communic8_user_id,
                     cu.salesforce_user_id
                         AS owner_salesforce_user_id,
+                    cu.salesforce_name
+                        AS owner_salesforce_name,
                     cu.salesforce_email
                         AS owner_salesforce_email,
                     cu.zoom_user_id
@@ -386,6 +390,9 @@ export async function getCorporateSmsConversationsForContact(
 
                     salesforceUserId:
                         row.owner_salesforce_user_id,
+
+                    salesforceName:
+                        row.owner_salesforce_name,
 
                     salesforceEmail:
                         row.owner_salesforce_email,
