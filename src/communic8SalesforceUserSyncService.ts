@@ -3,6 +3,7 @@ import { fetchSalesforce } from './salesforceApiService.js';
 
 type SalesforceUserRecord = {
     Id: string;
+    Name?: string | null;
     Email?: string | null;
     IsActive?: boolean;
 };
@@ -28,7 +29,7 @@ export async function syncCommunik8UsersFromSalesforce(
         '/services/data/v65.0/query?q=' +
         encodeURIComponent(
             `
-            SELECT Id, Email, IsActive
+            SELECT Id, Name, Email, IsActive
             FROM User
             WHERE Email != null
             `.replace(/\s+/g, ' ').trim()
@@ -76,6 +77,11 @@ export async function syncCommunik8UsersFromSalesforce(
                     ? salesforceUser.Email
                         .trim()
                         .toLowerCase()
+                    : '';
+
+            const salesforceName =
+                typeof salesforceUser.Name === 'string'
+                    ? salesforceUser.Name.trim()
                     : '';
 
             if (!salesforceUserId || !salesforceEmail) {
@@ -143,15 +149,17 @@ export async function syncCommunik8UsersFromSalesforce(
                         SET
                             salesforce_user_id = $1,
                             salesforce_email = $2,
+                            salesforce_name = NULLIF($3, ''),
                             matched_at = NOW(),
                             updated_at = NOW()
-                        WHERE id = $3
-                        AND installation_id = $4
+                        WHERE id = $4
+                        AND installation_id = $5
                         RETURNING id
                     `,
                     [
                         salesforceUserId,
                         salesforceEmail,
+                        salesforceName,
                         communic8UserId,
                         installationId
                     ]
