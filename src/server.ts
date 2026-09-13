@@ -38,6 +38,11 @@ import {
 } from './salesforceSmsConversationService.js';
 
 import {
+    CorporateMessageAccessDeniedError,
+    getCorporateSmsConversationsForContact
+} from './salesforceCorporateSmsConversationService.js';
+
+import {
     sendSmsForSalesforceContact
 } from './salesforceSmsSendService.js';
 
@@ -2229,6 +2234,93 @@ app.get(
         }
     }
 );
+
+app.get(
+    '/api/salesforce/sms/contacts/:contactId/corporate-conversations',
+    async (req, res) => {
+        try {
+            const installationId =
+                await resolveSalesforceApiInstallation(req);
+
+            if (!installationId) {
+                return res.status(401).json({
+                    error: 'Unauthorized'
+                });
+            }
+
+            const contactId = req.params.contactId;
+
+            if (!isSalesforceRecordId(contactId)) {
+                return res.status(400).json({
+                    error: 'Invalid Salesforce Contact ID'
+                });
+            }
+
+            const salesforceUserId =
+                getSalesforceUserId(req);
+
+            if (!salesforceUserId) {
+                return res.status(400).json({
+                    error: 'Salesforce User ID is required'
+                });
+            }
+
+            const conversations =
+                await getCorporateSmsConversationsForContact(
+                    installationId,
+                    salesforceUserId,
+                    contactId,
+                    {
+                        sessionLimit:
+                            parsePositiveIntegerQuery(
+                                req.query.sessionLimit
+                            ),
+                        messageLimitPerSession:
+                            parsePositiveIntegerQuery(
+                                req.query.messageLimit
+                            )
+                    }
+                );
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            );
+
+            return res.json({
+                contactId,
+                conversationCount:
+                    conversations.length,
+                conversations
+            });
+        } catch (error) {
+            if (
+                error instanceof
+                CorporateMessageAccessDeniedError
+            ) {
+                console.warn(
+                    '[SALESFORCE CORPORATE SMS ACCESS DENIED]'
+                );
+
+                return res.status(403).json({
+                    error:
+                        'Corporate SMS history access is not authorized'
+                });
+            }
+
+            console.error(
+                '[SALESFORCE CORPORATE SMS CONVERSATIONS ERROR]',
+                error
+            );
+
+            return res.status(500).json({
+                error:
+                    'Unable to load corporate SMS conversations'
+            });
+        }
+    }
+);
+
 
 app.post(
     '/api/salesforce/sms/contacts/:contactId/messages',
