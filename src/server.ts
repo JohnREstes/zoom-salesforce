@@ -63,6 +63,10 @@ import {
 } from './smsReconciliationService.js';
 
 import {
+    startSalesforceDirectorySyncWorker
+} from './communic8SalesforceDirectorySyncWorker.js';
+
+import {
     discoverSalesforceSmsHistory
 } from './salesforceSmsHistoryDiscoveryService.js';
 
@@ -2533,4 +2537,5 @@ app.listen(PORT, HOST, () => {
     );
 
     startSmsReconciliationWorker();
+    startSalesforceDirectorySyncWorker();
 });

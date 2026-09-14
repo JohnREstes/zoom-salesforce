@@ -14,6 +14,10 @@ type SalesforceQueryResponse = {
     records?: SalesforceUserRecord[];
 };
 
+type Communik8UserCandidate = {
+    id: number;
+};
+
 export async function syncCommunik8UsersFromSalesforce(
     installationId: string
 ): Promise<{
@@ -72,6 +76,11 @@ export async function syncCommunik8UsersFromSalesforce(
                     ? salesforceUser.Id.trim()
                     : '';
 
+            const salesforceName =
+                typeof salesforceUser.Name === 'string'
+                    ? salesforceUser.Name.trim()
+                    : '';
+
             const salesforceEmail =
                 typeof salesforceUser.Email === 'string'
                     ? salesforceUser.Email
@@ -79,46 +88,95 @@ export async function syncCommunik8UsersFromSalesforce(
                         .toLowerCase()
                     : '';
 
-            const salesforceName =
-                typeof salesforceUser.Name === 'string'
-                    ? salesforceUser.Name.trim()
-                    : '';
+            const salesforceIsActive =
+                salesforceUser.IsActive === true;
 
             if (!salesforceUserId || !salesforceEmail) {
                 continue;
             }
 
-            const candidateResult =
-                await db.query<{
-                    id: number;
-                }>(
+            /*
+             * Prefer an existing durable Salesforce mapping first.
+             *
+             * This allows a Salesforce user's email address to change
+             * without breaking the Communik8 identity relationship.
+             */
+            let candidateResult =
+                await db.query<Communik8UserCandidate>(
                     `
                         SELECT id
                         FROM communic8_users
                         WHERE installation_id = $1
-                        AND LOWER(zoom_email) = $2
+                          AND salesforce_user_id = $2
                         ORDER BY id
                         LIMIT 2
                     `,
                     [
                         installationId,
-                        salesforceEmail
+                        salesforceUserId
                     ]
                 );
 
+            if (
+                candidateResult.rowCount !== null &&
+                candidateResult.rowCount > 1
+            ) {
+                unmatchedSalesforceUsers++;
+
+                console.warn(
+                    '[COMMUNIK8 SALESFORCE USER MAPPING AMBIGUOUS]',
+                    {
+                        installationId,
+                        candidateCount:
+                            candidateResult.rowCount
+                    }
+                );
+
+                continue;
+            }
+
             /*
-            * Identity matching must fail closed.
-            *
-            * Zero Zoom matches:
-            *   Salesforce user remains unmatched.
-            *
-            * Multiple Zoom matches:
-            *   Ambiguous identity. Do not update any row.
-            *
-            * Exactly one Zoom match:
-            *   Safe to establish the durable Salesforce ↔ Zoom
-            *   identity relationship.
-            */
+             * If no durable Salesforce mapping exists yet, fall back
+             * to the original deterministic email match against Zoom.
+             *
+             * Never take over a Communik8 row already mapped to a
+             * different Salesforce user.
+             */
+            if (candidateResult.rowCount === 0) {
+                candidateResult =
+                    await db.query<Communik8UserCandidate>(
+                        `
+                            SELECT id
+                            FROM communic8_users
+                            WHERE installation_id = $1
+                              AND LOWER(zoom_email) = $2
+                              AND (
+                                  salesforce_user_id IS NULL
+                                  OR salesforce_user_id = $3
+                              )
+                            ORDER BY id
+                            LIMIT 2
+                        `,
+                        [
+                            installationId,
+                            salesforceEmail,
+                            salesforceUserId
+                        ]
+                    );
+            }
+
+            /*
+             * Identity matching must fail closed.
+             *
+             * Zero candidates:
+             *   Salesforce user remains unmatched.
+             *
+             * Multiple candidates:
+             *   Ambiguous identity. Do not update any row.
+             *
+             * Exactly one candidate:
+             *   Safe to refresh the durable Salesforce identity.
+             */
             if (candidateResult.rowCount !== 1) {
                 unmatchedSalesforceUsers++;
 
@@ -150,16 +208,22 @@ export async function syncCommunik8UsersFromSalesforce(
                             salesforce_user_id = $1,
                             salesforce_email = $2,
                             salesforce_name = NULLIF($3, ''),
-                            matched_at = NOW(),
+                            salesforce_is_active = $4,
+                            salesforce_synced_at = NOW(),
+                            matched_at = COALESCE(
+                                matched_at,
+                                NOW()
+                            ),
                             updated_at = NOW()
-                        WHERE id = $4
-                        AND installation_id = $5
+                        WHERE id = $5
+                          AND installation_id = $6
                         RETURNING id
                     `,
                     [
                         salesforceUserId,
                         salesforceEmail,
                         salesforceName,
+                        salesforceIsActive,
                         communic8UserId,
                         installationId
                     ]
