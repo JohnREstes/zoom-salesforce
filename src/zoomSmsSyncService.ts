@@ -3,6 +3,9 @@ import {
     getSmsSessions,
     getUserSmsSessions
 } from './zoomPhoneService.js';
+import {
+    applyDurableContactMappingToSmsSession
+} from './salesforceContactPhoneMappingService.js';
 
 
 type ZoomSmsParticipant = {
@@ -26,6 +29,36 @@ type ZoomSmsSessionsResponse = {
     next_page_token?: string;
     sms_sessions?: ZoomSmsSession[];
 };
+
+async function tryApplyDurableContactMapping(
+    installationId: string,
+    smsSessionId: number
+): Promise<void> {
+    try {
+        const result = await applyDurableContactMappingToSmsSession(
+            installationId,
+            smsSessionId
+        );
+
+        if (result.matched) {
+            console.log('[ZOOM SMS DURABLE SALESFORCE CONTACT MATCH]', {
+                installationId,
+                smsSessionId
+            });
+        } else if (result.ambiguous) {
+            console.warn('[ZOOM SMS DURABLE SALESFORCE CONTACT AMBIGUOUS]', {
+                installationId,
+                smsSessionId
+            });
+        }
+    } catch (error) {
+        console.warn('[ZOOM SMS DURABLE SALESFORCE CONTACT MATCH FAILED]', {
+            installationId,
+            smsSessionId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+}
 
 export async function syncSmsSessions(
     installationId: string
@@ -155,6 +188,11 @@ export async function syncSmsSessions(
                 }
 
                 await client.query('COMMIT');
+
+                await tryApplyDurableContactMapping(
+                    installationId,
+                    Number(smsSessionId)
+                );
 
                 sessionsProcessed += 1;
             } catch (error) {
@@ -352,6 +390,11 @@ export async function syncSmsSessionSnapshot(
                 }
 
                 await client.query('COMMIT');
+
+                await tryApplyDurableContactMapping(
+                    installationId,
+                    smsSessionId
+                );
 
                 console.log(
                     '[ZOOM SMS SESSION SNAPSHOT SYNCED]',
@@ -576,6 +619,11 @@ export async function syncSmsSessionsForUser(
                 }
 
                 await client.query('COMMIT');
+
+                await tryApplyDurableContactMapping(
+                    installationId,
+                    Number(smsSessionId)
+                );
 
                 sessionsProcessed += 1;
             } catch (error) {
@@ -953,6 +1001,11 @@ export async function recoverSmsParticipantsFromMessages(
             );
 
             await client.query('COMMIT');
+
+            await tryApplyDurableContactMapping(
+                installationId,
+                smsSessionId
+            );
 
             console.log(
                 '[ZOOM SMS PARTICIPANTS RECOVERED FROM MESSAGE]',
@@ -1444,6 +1497,11 @@ export async function backfillSmsSessionParticipantDetailsFromMessages(
             );
 
             await client.query('COMMIT');
+
+            await tryApplyDurableContactMapping(
+                installationId,
+                Number(row.sms_session_id)
+            );
 
             repaired += 1;
         } catch (error) {

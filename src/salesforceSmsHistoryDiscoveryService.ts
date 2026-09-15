@@ -5,6 +5,9 @@ import {
 import {
     syncSmsMessagesForSession
 } from './zoomSmsMessageSyncService.js';
+import {
+    saveSalesforceContactPhoneMappings
+} from './salesforceContactPhoneMappingService.js';
 
 type CandidateSessionRow = {
     id: number;
@@ -95,6 +98,18 @@ export async function discoverSalesforceSmsHistory(
             synced: false
         };
     }
+
+    /*
+     * Persist the Contact's current phone identities. Future Zoom sessions
+     * can use this durable mapping without requiring this Contact page to
+     * be opened again.
+     */
+    await saveSalesforceContactPhoneMappings(
+        installationId,
+        contactId,
+        contact.accountId,
+        rawPhones
+    );
 
     /*
      * Search only Communik8's local participant index.
