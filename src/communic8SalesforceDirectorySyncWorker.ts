@@ -4,6 +4,10 @@ import {
     syncCommunik8UsersFromSalesforce
 } from './communic8SalesforceUserSyncService.js';
 
+import {
+    syncSalesforceContactPhoneDirectory
+} from './communic8SalesforceContactDirectorySyncService.js';
+
 const DEFAULT_INTERVAL_MS =
     6 * 60 * 60 * 1000;
 
@@ -123,8 +127,13 @@ Promise<void> {
          */
         for (const installationId of installationIds) {
             try {
-                const result =
+                const userResult =
                     await syncCommunik8UsersFromSalesforce(
+                        installationId
+                    );
+
+                const contactResult =
+                    await syncSalesforceContactPhoneDirectory(
                         installationId
                     );
 
@@ -134,12 +143,22 @@ Promise<void> {
                     '[SALESFORCE DIRECTORY INSTALLATION SYNC COMPLETE]',
                     {
                         installationId,
+
                         salesforceUsersProcessed:
-                            result.salesforceUsersProcessed,
+                            userResult.salesforceUsersProcessed,
                         matchedUsers:
-                            result.matchedUsers,
+                            userResult.matchedUsers,
                         unmatchedSalesforceUsers:
-                            result.unmatchedSalesforceUsers
+                            userResult.unmatchedSalesforceUsers,
+
+                        contactsProcessed:
+                            contactResult.contactsProcessed,
+                        contactsWithPhones:
+                            contactResult.contactsWithPhones,
+                        contactMappingsWritten:
+                            contactResult.mappingsWritten,
+                        staleContactMappingsRemoved:
+                            contactResult.staleMappingsRemoved
                     }
                 );
             } catch (error) {
